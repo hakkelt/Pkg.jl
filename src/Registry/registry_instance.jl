@@ -39,6 +39,14 @@ mutable struct VersionInfo
     const yanked::Bool
 end
 
+# A subpackage of a registered package version (from Subpackages.toml)
+struct SubpackageInfo
+    deps::Set{UUID}
+    siblings::Vector{String}
+end
+Base.:(==)(a::SubpackageInfo, b::SubpackageInfo) = a.deps == b.deps && a.siblings == b.siblings
+Base.hash(a::SubpackageInfo, h::UInt) = hash(a.siblings, hash(a.deps, hash(SubpackageInfo, h)))
+
 # This is the information that exists in e.g. General/A/ACME
 struct PkgInfo
     # Package.toml:
@@ -62,6 +70,73 @@ struct PkgInfo
 
     # WeakCompat.toml - version constraints on weak deps
     weak_compat::Dict{VersionRange, Dict{UUID, VersionSpec}}
+
+    # Subpackages.toml - which subpackages exist, and what each depends on: the UUIDs of
+    # its (weak) dependencies, and the names of the sibling subpackages it depends on
+    subpackages::Dict{VersionRange, Dict{String, SubpackageInfo}}
+
+    # Subdeps.toml - which subpackages of its dependencies this package uses
+    subdeps::Dict{VersionRange, Dict{UUID, Vector{String}}}
+end
+
+# Helper to load Subpackages.toml
+function load_subpackages_data(data_toml::Dict{String, Any}, name_to_uuid)
+    subpackages = Dict{VersionRange, Dict{String, SubpackageInfo}}()
+    for (v, data) in data_toml
+        data = data::Dict{String, Any}
+        d = Dict{String, SubpackageInfo}()
+        for (sub, deps) in data
+            info = SubpackageInfo(Set{UUID}(), String[])
+            for dep in deps::Vector
+                dep = dep::String
+                uuid = get(name_to_uuid, dep, nothing)
+                uuid === nothing ? push!(info.siblings, dep) : push!(info.deps, uuid)
+            end
+            d[sub] = info
+        end
+        subpackages[VersionRange(v)] = d
+    end
+    return subpackages
+end
+
+# Helper to load Subdeps.toml
+function load_subdeps_data(data_toml::Dict{String, Any}, name_to_uuid)
+    subdeps = Dict{VersionRange, Dict{UUID, Vector{String}}}()
+    for (v, data) in data_toml
+        data = data::Dict{String, Any}
+        subdeps[VersionRange(v)] = Dict{UUID, Vector{String}}(
+            name_to_uuid[dep] => String[s::String for s in subs::Vector] for (dep, subs) in data)
+    end
+    return subdeps
+end
+
+"""
+    query_subpackages(pkg_info::PkgInfo, version::VersionNumber)
+
+The subpackages that exist in `version`, with what each of them depends on.
+"""
+function query_subpackages(pkg::PkgInfo, version::VersionNumber)
+    result = Dict{String, SubpackageInfo}()
+    for (vrange, subs) in pkg.subpackages
+        version in vrange && merge!(result, subs)
+    end
+    return result
+end
+
+"""
+    query_subdeps(pkg_info::PkgInfo, version::VersionNumber)
+
+Which subpackages of its dependencies `version` uses.
+"""
+function query_subdeps(pkg::PkgInfo, version::VersionNumber)
+    result = Dict{UUID, Vector{String}}()
+    for (vrange, subdeps) in pkg.subdeps
+        version in vrange || continue
+        for (uuid, subs) in subdeps
+            append!(get!(Vector{String}, result, uuid), subs)
+        end
+    end
+    return result
 end
 
 isyanked(pkg::PkgInfo, v::VersionNumber) = pkg.version_info[v].yanked
@@ -399,9 +474,10 @@ end
 # Cache files are named by the registry's tree hash and never overwritten.
 
 const CACHE_MAGIC = b"JLREGC\0\0"
-const CACHE_VERSION = UInt32(1)
+const CACHE_VERSION = UInt32(2) # 2: added Subpackages.toml and Subdeps.toml
 const CACHE_MISSING = typemax(UInt32)
-const PKG_FILES = ("Package.toml", "Versions.toml", "Deps.toml", "WeakDeps.toml", "Compat.toml", "WeakCompat.toml")
+const PKG_FILES = ("Package.toml", "Versions.toml", "Deps.toml", "WeakDeps.toml", "Compat.toml", "WeakCompat.toml",
+    "Subpackages.toml", "Subdeps.toml")
 const CACHE_HEADER_SIZE = 36 + 4 * 8
 const RECORD_SIZE = 16 + 8 * (2 + length(PKG_FILES))
 
@@ -746,6 +822,10 @@ function init_package_info!(registry::RegistryInstance, pkg::PkgEntry)
         # WeakCompat.toml (convert names to UUIDs using the mapping)
         weak_compat = load_compat_data(something(parse_pkg_file(registry, pkg, 6), Dict{String, Any}()), name_to_uuid)
 
+        # Subpackages.toml and Subdeps.toml (names refer to Deps.toml/WeakDeps.toml)
+        subpackages = load_subpackages_data(something(parse_pkg_file(registry, pkg, 7), Dict{String, Any}()), name_to_uuid)
+        subdeps = load_subdeps_data(something(parse_pkg_file(registry, pkg, 8), Dict{String, Any}()), name_to_uuid)
+
         #=
         # These validations are a bit too expensive
         # RegistryTools does this already: https://github.com/JuliaRegistries/RegistryTools.jl/blob/b5ff4d541b0aad2261ac21416113cee9718e28b3/src/Compress.jl#L64
@@ -766,7 +846,7 @@ function init_package_info!(registry::RegistryInstance, pkg::PkgEntry)
         =#
 
         @assert !isdefined(pkg, :info)
-        pkg.info = PkgInfo(repo, subdir, deprecated, version_info, deps, compat, weak_deps, weak_compat)
+        pkg.info = PkgInfo(repo, subdir, deprecated, version_info, deps, compat, weak_deps, weak_compat, subpackages, subdeps)
 
         # Free memory: delete the package's files from in_memory_registry since we've fully parsed them
         if in_memory_registry !== nothing

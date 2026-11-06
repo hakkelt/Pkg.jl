@@ -271,6 +271,12 @@ end
                     weakdeps = read_deps(get(info::Dict, "weakdeps", nothing)::Union{Nothing, Dict{String, Any}, Vector{String}})
                     entry.apps = read_apps(get(info::Dict, "apps", nothing)::Union{Nothing, Dict{String, Any}})
                     entry.exts = read_exts(get(info, "extensions", nothing)::Union{Nothing, Dict{String, Any}})
+                    subs = get(info, "subpackages", nothing)
+                    if subs isa Vector
+                        entry.subpackages = String[x::String for x in subs]
+                    elseif subs !== nothing
+                        pkgerror("Expected `subpackages` field to be a list of names, got $(typeof(subs)).")
+                    end
                     syntax = get(info, "syntax", nothing)::Union{Dict{String, Any}, Nothing}
                     if syntax !== nothing
                         entry.julia_syntax_version = read_field("julia_version", nothing, syntax, safe_version)
@@ -462,6 +468,9 @@ function destructure(manifest::Manifest)::Dict
         # TODO: Write this inline
         if !isempty(entry.exts)
             entry!(new_entry, "extensions", entry.exts)
+        end
+        if !isempty(entry.subpackages)
+            new_entry["subpackages"] = sort(entry.subpackages)
         end
 
         if !isempty(entry.apps)

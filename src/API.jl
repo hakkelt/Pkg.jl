@@ -411,6 +411,26 @@ function add(
     )
     from === nothing && require_not_empty(pkgs, :add)
     Context!(ctx; kwargs...)
+    pkgs, subpackages = split_subpackage_specs(pkgs)
+    if !isempty(subpackages)
+        # `add Parent::Sub` for a package that is already a dependency only starts using the
+        # subpackage: adding the package again would e.g. stop tracking a developed one
+        project = ctx.env.project
+        is_dep(name) = haskey(project.deps, name) || haskey(project._deps_weak, name)
+        plain(pkg) = pkg.version == VersionSpec() && pkg.repo.source === nothing && pkg.repo.rev === nothing &&
+            pkg.path === nothing && pkg.uuid === nothing && !pkg.pinned
+        filter!(pkg -> !(haskey(subpackages, pkg.name) && is_dep(pkg.name) && plain(pkg)), pkgs)
+        if isempty(pkgs)
+            target == :deps || pkgerror("subpackages can only be added as `deps`")
+            check_readonly(ctx)
+            for (name, subs) in subpackages
+                is_dep(name) || continue
+                project.subdeps[name] = sort!(union(get(project.subdeps, name, String[]), subs))
+            end
+            resolve(ctx)
+            return
+        end
+    end
     Operations.ensure_manifest_registries!(ctx)
     check_readonly(ctx)
     if from !== nothing
@@ -468,6 +488,12 @@ function add(
             update_source_if_set(ctx.env, pkg)
         end
 
+        if !isempty(subpackages)
+            target == :deps || pkgerror("subpackages can only be added as `deps`")
+            for (name, subs) in subpackages
+                ctx.env.project.subdeps[name] = sort!(union(get(ctx.env.project.subdeps, name, String[]), subs))
+            end
+        end
         Operations.add(ctx, pkgs, new_git; allow_autoprecomp, preserve, platform, target, prefer_loaded_versions, lazy)
     catch
         remove_unused_checkouts(ctx, repo_pkgs, new_git)
@@ -478,6 +504,28 @@ end
 
 # Remove the checkouts made by a failed `add` that the environment does not use: a later
 # `add` would find them installed and skip building them (#1236)
+# `Parent::Sub` names subpackage `Sub` of package `Parent`. Returns the package specs with
+# those turned into `Parent` (once per parent), and the subpackages named for each parent.
+function split_subpackage_specs(pkgs::Vector{PackageSpec})
+    subpackages = Dict{String, Vector{String}}()
+    out = PackageSpec[]
+    for pkg in pkgs
+        if pkg.name isa String && occursin("::", pkg.name)
+            parent, sub = split(pkg.name, "::"; limit = 2)
+            (Base.isidentifier(parent) && Base.isidentifier(sub)) ||
+                pkgerror("`$(pkg.name)` is not a valid subpackage, expected `Parent::Sub`")
+            pkg = deepcopy(pkg)
+            pkg.name = String(parent)
+            subs = get!(Vector{String}, subpackages, pkg.name)
+            sub in subs || push!(subs, String(sub))
+            # `add A::B A::C` names package `A` once
+            any(p -> p.name == pkg.name, out) && continue
+        end
+        push!(out, pkg)
+    end
+    return out, subpackages
+end
+
 function remove_unused_checkouts(ctx::Context, repo_pkgs::Vector{PackageSpec}, new_git::Set{UUID})
     isempty(new_git) && return
     try
@@ -502,6 +550,23 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec}; mode = PKGMODE_PROJECT, all
     Context!(ctx; kwargs...)
     Operations.ensure_manifest_registries!(ctx)
     check_readonly(ctx)
+    # `rm Parent::Sub` stops using the subpackage, and keeps the package
+    sub_pkgs = filter(pkg -> pkg.name isa String && occursin("::", pkg.name), pkgs)
+    if !isempty(sub_pkgs)
+        _, subpackages = split_subpackage_specs(sub_pkgs)
+        for (name, subs) in subpackages
+            used = get(ctx.env.project.subdeps, name, String[])
+            unused = setdiff(subs, used)
+            isempty(unused) || pkgerror("the project does not use subpackage(s) $(join(unused, ", ")) of `$name`")
+            remaining = setdiff(used, subs)
+            isempty(remaining) ? delete!(ctx.env.project.subdeps, name) : (ctx.env.project.subdeps[name] = remaining)
+        end
+        pkgs = filter(pkg -> !any(p -> p === pkg, sub_pkgs), pkgs)
+        if isempty(pkgs) && !all_pkgs
+            resolve(ctx)
+            return
+        end
+    end
     if all_pkgs
         !isempty(pkgs) && pkgerror("cannot specify packages when operating on all packages")
         append_all_pkgs!(pkgs, ctx, mode)
