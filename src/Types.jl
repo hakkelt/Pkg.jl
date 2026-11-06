@@ -272,6 +272,10 @@ Base.@kwdef mutable struct Project
     _deps_weak::Dict{String, UUID} = Dict{String, UUID}()
     weakdeps::Dict{String, UUID} = Dict{String, UUID}()
     exts::Dict{String, Union{Vector{String}, String}} = Dict{String, String}()
+    # `[subpackages]`: name => raw entry (a list of deps, or a table with `deps` and `autoload`)
+    subpackages::Dict{String, Any} = Dict{String, Any}()
+    # `[subdeps]`: name of a dependency => the subpackages of it that this project uses
+    subdeps::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     extras::Dict{String, UUID} = Dict{String, UUID}()
     targets::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     apps::Dict{String, AppInfo} = Dict{String, AppInfo}()
@@ -297,6 +301,10 @@ Base.@kwdef mutable struct PackageEntry
     deps::Dict{String, UUID} = Dict{String, UUID}()
     weakdeps::Dict{String, UUID} = Dict{String, UUID}()
     exts::Dict{String, Union{Vector{String}, String}} = Dict{String, String}()
+    # copied from the package's project file: its `[subpackages]` (name => list of deps,
+    # or a table with `deps` and `autoload`) and its `[subdeps]`
+    subpackages::Dict{String, Any} = Dict{String, Any}()
+    subdeps::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     uuid::Union{Nothing, UUID} = nothing
     apps::Dict{String, AppInfo} = Dict{String, AppInfo}() # used by AppManifest.toml
     registries::Vector{String} = String[]
@@ -313,12 +321,14 @@ Base.:(==)(t1::PackageEntry, t2::PackageEntry) = t1.name == t2.name &&
     t1.deps == t2.deps &&
     t1.weakdeps == t2.weakdeps &&
     t1.exts == t2.exts &&
+    t1.subpackages == t2.subpackages &&
+    t1.subdeps == t2.subdeps &&
     t1.uuid == t2.uuid &&
     t1.apps == t2.apps &&
     t1.julia_syntax_version == t2.julia_syntax_version &&
     t1.registries == t2.registries
 # omits `other`
-Base.hash(x::PackageEntry, h::UInt) = foldr(hash, [x.name, x.version, x.path, x.entryfile, x.pinned, x.repo, x.tree_hash, x.deps, x.weakdeps, x.exts, x.uuid, x.registries, x.julia_syntax_version], init = h)  # omits `other`
+Base.hash(x::PackageEntry, h::UInt) = foldr(hash, [x.name, x.version, x.path, x.entryfile, x.pinned, x.repo, x.tree_hash, x.deps, x.weakdeps, x.exts, x.subpackages, x.subdeps, x.uuid, x.registries, x.julia_syntax_version], init = h)  # omits `other`
 
 """
     ManifestRegistryEntry
@@ -734,6 +744,19 @@ function workspace_resolve_hash(env::EnvCache; include_sources::Bool = true)
         println(iob)
         for (name, compat) in sort!(collect(extras_compats); by = first)
             println(iob, name, "=", compat)
+        end
+    end
+    # `[subdeps]` changes what gets installed. Only appended when present, as above.
+    subdeps = Dict{String, Vector{String}}()
+    for project in Iterators.flatten(((env.project,), values(env.workspace)))
+        for (name, subs) in project.subdeps
+            subdeps[name] = sort!(union(get(subdeps, name, String[]), subs))
+        end
+    end
+    if !isempty(subdeps)
+        println(iob, "\nsubdeps")
+        for (name, subs) in sort!(collect(subdeps); by = first)
+            println(iob, name, "=", join(subs, ","))
         end
     end
     overrides = Dict{String, VersionSpec}()

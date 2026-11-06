@@ -1,6 +1,14 @@
 Pkg v1.14 Release Notes
 =======================
 
+- (Prototype) Subpackages: a package can ship modules in `sub/` that are listed in `[subpackages]`, share its
+  version, and are loaded explicitly. A project declares the subpackages of its dependencies that it uses in
+  `[subdeps]`, e.g. `Solvers = ["BDF"]`; `Pkg.add("Solvers::BDF")` (`pkg> add Solvers::BDF`) adds it and
+  `Pkg.rm("Solvers::BDF")` stops using it. Only the weak dependencies that the subpackages in use need are
+  installed and versions of the parent without them are ruled out. Manifest entries copy the `[subpackages]`
+  and `[subdeps]` sections of their package, which Julia reads to load subpackages. `Pkg.status` shows the
+  subpackages in use, as in `Solvers v1.2.3 ::{BDF}`. Registries describe them in `Subpackages.toml` and
+  `Subdeps.toml`.
 - Pkg now resolves package versions with the exact SAT-based resolver from
   [Resolver.jl](https://github.com/JuliaLang/Resolver.jl). It finds the same solutions as the previous
   resolver where one exists, is typically faster, and when the requirements cannot be satisfied it reports each

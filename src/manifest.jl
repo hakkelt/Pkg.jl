@@ -271,6 +271,8 @@ end
                     weakdeps = read_deps(get(info::Dict, "weakdeps", nothing)::Union{Nothing, Dict{String, Any}, Vector{String}})
                     entry.apps = read_apps(get(info::Dict, "apps", nothing)::Union{Nothing, Dict{String, Any}})
                     entry.exts = read_exts(get(info, "extensions", nothing)::Union{Nothing, Dict{String, Any}})
+                    entry.subpackages = read_project_subpackages(get(info, "subpackages", nothing))
+                    entry.subdeps = read_project_subdeps(get(info, "subdeps", nothing))
                     syntax = get(info, "syntax", nothing)::Union{Dict{String, Any}, Nothing}
                     if syntax !== nothing
                         entry.julia_syntax_version = read_field("julia_version", nothing, syntax, safe_version)
@@ -462,6 +464,12 @@ function destructure(manifest::Manifest)::Dict
         # TODO: Write this inline
         if !isempty(entry.exts)
             entry!(new_entry, "extensions", entry.exts)
+        end
+        if !isempty(entry.subpackages)
+            new_entry["subpackages"] = entry.subpackages
+        end
+        if !isempty(entry.subdeps)
+            new_entry["subdeps"] = entry.subdeps
         end
 
         if !isempty(entry.apps)

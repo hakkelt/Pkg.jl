@@ -448,6 +448,21 @@ function update_manifest!(env::EnvCache, pkgs::Vector{PackageSpec}, deps_map, @n
             entry.version = stdlib_version(pkg.uuid, julia_version)
         end
         entry.deps = deps_map[pkg.uuid]
+        # The subpackage sections of the package's project file, until
+        # `fixups_from_projectfile!` reads them from the installed source
+        if !is_tracking_registry(pkg)
+            project = subpackage_source_project(env, pkg)
+            if project !== nothing
+                entry.subpackages = copy(project.subpackages)
+                entry.subdeps = copy(project.subdeps)
+            end
+        else
+            old = manifest_info(env.original_manifest, pkg.uuid)
+            if old !== nothing && old.tree_hash == pkg.tree_hash
+                entry.subpackages = copy(old.subpackages)
+                entry.subdeps = copy(old.subdeps)
+            end
+        end
 
         # Convert registry UUIDs to names
         if haskey(pkg_to_registries, pkg.uuid)
@@ -550,6 +565,8 @@ function fixups_from_projectfile!(ctx::Context; tmpdir::Union{Nothing, String} =
                 p = Types.read_project(project_file)
                 pkg.weakdeps = p.weakdeps
                 pkg.exts = p.exts
+                pkg.subpackages = p.subpackages
+                pkg.subdeps = p.subdeps
                 pkg.entryfile = p.entryfile
                 pkg.julia_syntax_version = get_project_syntax_version(p, ctx.julia_version)
 
@@ -597,6 +614,8 @@ function reuse_project_info!(ctx::Context)
             syntax_version == registry_julia_compat_lower(ctx.registries, uuid, entry.version) || continue
         entry.weakdeps = copy(old_entry.weakdeps)
         entry.exts = copy(old_entry.exts)
+        entry.subpackages = copy(old_entry.subpackages)
+        entry.subdeps = copy(old_entry.subdeps)
         entry.entryfile = old_entry.entryfile
         entry.julia_syntax_version = old_entry.julia_syntax_version
         for name in keys(entry.weakdeps)
@@ -1113,6 +1132,167 @@ end
 # sets version to a VersionNumber
 # adds any other packages which may be in the dependency graph
 # all versioned packages should have a `tree_hash`
+const MAX_SUBPACKAGE_ITERATIONS = 5
+
+# The project file of a package that is tracking a path or a repo, or of the active project
+function subpackage_source_project(env::EnvCache, pkg::PackageSpec)
+    Types.is_project_uuid(env, pkg.uuid) && return env.project
+    for (_, project) in env.workspace
+        project.uuid == pkg.uuid && return project
+    end
+    path = source_path(env.manifest_file, pkg)
+    (path === nothing || !isdir(path)) && return nothing
+    project_file = projectfile_path(path; strict = true)
+    return project_file === nothing ? nothing : read_project(project_file)
+end
+
+function registry_pkg_info(registries::Vector{Registry.RegistryInstance}, uuid::UUID, version::Union{Nothing, VersionNumber} = nothing)
+    for reg in registries
+        reg_pkg = get(reg, uuid, nothing)
+        reg_pkg === nothing && continue
+        info = Registry.registry_info(reg, reg_pkg)
+        (version === nothing || haskey(info.version_info, version)) && return info
+    end
+    return nothing
+end
+
+"""
+    collect_subpackage_selection(env, registries, pkgs, versions)
+
+Which subpackages of which packages the environment uses: the `[subdeps]` of the
+projects in the workspace, of the packages that track a path or a repo, and of the
+registered package versions in `versions` (or in `pkgs`, if `versions` lacks them).
+"""
+function collect_subpackage_selection(env::EnvCache, registries::Vector{Registry.RegistryInstance},
+                                      pkgs::Vector{PackageSpec}, versions::Dict{UUID, VersionNumber} = Dict{UUID, VersionNumber}())
+    selection = Dict{UUID, Set{String}}()
+    function add_project!(project::Project)
+        for (name, subs) in project.subdeps
+            uuid = get(project.deps, name, get(project._deps_weak, name, nothing))
+            uuid === nothing || union!(get!(Set{String}, selection, uuid), subs)
+        end
+    end
+    add_project!(env.project)
+    foreach(add_project!, values(env.workspace))
+    seen = Set{UUID}()
+    for pkg in pkgs
+        pkg.uuid === nothing && continue
+        push!(seen, pkg.uuid)
+        if !is_tracking_registry(pkg)
+            project = subpackage_source_project(env, pkg)
+            project === nothing || add_project!(project)
+        else
+            version = get(versions, pkg.uuid, pkg.version)
+            version isa VersionNumber || continue
+            add_registered_subdeps!(selection, registries, pkg.uuid, version)
+        end
+    end
+    # registered packages that the resolver added
+    for (uuid, version) in versions
+        uuid in seen && continue
+        add_registered_subdeps!(selection, registries, uuid, version)
+    end
+    return selection
+end
+
+function add_registered_subdeps!(selection, registries, uuid::UUID, version::VersionNumber)
+    info = registry_pkg_info(registries, uuid, version)
+    info === nothing && return
+    for (dep, subs) in Registry.query_subdeps(info, version)
+        union!(get!(Set{String}, selection, dep), subs)
+    end
+    return
+end
+
+# The dependencies (by UUID) that subpackages `subs` need, following sibling subpackages
+subpackage_dep_uuids(project::Project, subs) =
+    subpackage_dep_uuids(project.subpackages, project.deps, project.weakdeps, subs)
+subpackage_dep_uuids(entry::PackageEntry, subs) =
+    subpackage_dep_uuids(entry.subpackages, entry.deps, entry.weakdeps, subs)
+function subpackage_dep_uuids(subpackages::Dict{String, Any}, deps::Dict{String, UUID},
+                              weakdeps::Dict{String, UUID}, subs)
+    uuids = Set{UUID}()
+    todo = collect(String, subs)
+    seen = Set{String}()
+    while !isempty(todo)
+        sub = pop!(todo)
+        sub in seen && continue
+        push!(seen, sub)
+        haskey(subpackages, sub) || continue
+        for dep in Types.subpackage_deps(subpackages, sub)
+            if haskey(subpackages, dep)
+                push!(todo, dep)
+            else
+                uuid = get(weakdeps, dep, get(deps, dep, nothing))
+                uuid === nothing || push!(uuids, uuid)
+            end
+        end
+    end
+    return uuids
+end
+
+function subpackage_dep_uuids(info::Dict{String, Registry.SubpackageInfo}, subs)
+    uuids = Set{UUID}()
+    todo = collect(String, subs)
+    seen = Set{String}()
+    while !isempty(todo)
+        sub = pop!(todo)
+        (sub in seen || !haskey(info, sub)) && continue
+        push!(seen, sub)
+        union!(uuids, info[sub].deps)
+        append!(todo, info[sub].siblings)
+    end
+    return uuids
+end
+
+"""
+    subpackage_requirements(env, registries, pkgs, versions, julia_version)
+
+The extra requirements from the subpackages that the environment uses (see
+[`collect_subpackage_selection`](@ref)): each of their dependencies, and, for a
+registered parent, the versions of it that have all of them.
+"""
+function subpackage_requirements(env::EnvCache, registries::Vector{Registry.RegistryInstance},
+                                 pkgs::Vector{PackageSpec}, versions::Dict{UUID, VersionNumber},
+                                 @nospecialize(julia_version::Union{VersionNumber, Nothing}))
+    selection = collect_subpackage_selection(env, registries, pkgs, versions)
+    extra = Dict{UUID, VersionSpec}()
+    pkg_by_uuid = Dict{UUID, PackageSpec}(pkg.uuid => pkg for pkg in pkgs if pkg.uuid !== nothing)
+    for (uuid, subs) in selection
+        pkg = get(pkg_by_uuid, uuid, nothing)
+        if pkg !== nothing && !is_tracking_registry(pkg)
+            project = subpackage_source_project(env, pkg)
+            project === nothing && continue
+            missing_subs = filter(s -> !haskey(project.subpackages, s), sort!(collect(subs)))
+            isempty(missing_subs) ||
+                pkgerror("package $(err_rep(pkg)) has no subpackage(s) $(join(missing_subs, ", ")), which the environment uses")
+            for dep in subpackage_dep_uuids(project, subs)
+                extra[dep] = get(extra, dep, VersionSpec())
+            end
+        else
+            info = registry_pkg_info(registries, uuid)
+            info === nothing && continue
+            good = VersionNumber[]
+            for v in keys(info.version_info)
+                available = Registry.query_subpackages(info, v)
+                all(s -> haskey(available, s), subs) && push!(good, v)
+            end
+            name = something(registered_name(registries, uuid), string(uuid))
+            isempty(good) &&
+                pkgerror("no registered version of package $name has the subpackage(s) $(join(sort!(collect(subs)), ", ")), which the environment uses")
+            sort!(good)
+            extra[uuid] = intersect(get(extra, uuid, VersionSpec()), VersionSpec([VersionRange(v) for v in good]))
+            # the dependencies of the version picked, or of the newest one that qualifies
+            v = get(versions, uuid, nothing)
+            v = v !== nothing && v in good ? v : last(good)
+            for dep in subpackage_dep_uuids(Registry.query_subpackages(info, v), subs)
+                extra[dep] = get(extra, dep, VersionSpec())
+            end
+        end
+    end
+    return extra
+end
+
 function resolve_versions!(
         env::EnvCache, registries::Vector{Registry.RegistryInstance}, pkgs::Vector{PackageSpec}, @nospecialize(julia_version::Union{VersionNumber, Nothing}),
         installed_only::Bool, preferred_versions::Dict{UUID, VersionNumber} = Dict{UUID, VersionNumber}();
@@ -1214,21 +1394,43 @@ function resolve_versions!(
             compat_overrides[uuid] = get_compat_override_workspace(env, name)
         end
     end
-    deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed, pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed = deps_graph(env, registries, names, reqs, fixed, julia_version, installed_only; compat_overrides)
-    if resolver_backend() === :sat
-        vers = SATResolve.resolve_versions(
-            deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
-            pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions;
-            pinned, compat_sources, req_sources, diagnose_unsat
-        )
-    else
-        # behind an inference barrier, so that the precompile workload does not
-        # compile the legacy resolver into Pkg's image: it is opt-in, and its
-        # first use may take the compile latency
-        vers = Base.inferencebarrier(maxsum_resolve_versions)(
-            deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
-            pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions
-        )::Dict{UUID, VersionNumber}
+    # Subpackages that something in the environment uses turn their weak dependencies
+    # into requirements, and restrict their parent to versions that have them. Which
+    # ones are used depends on the versions picked, so resolve until that settles.
+    base_reqs = copy(reqs)
+    base_fixed = fixed
+    subpackage_reqs = Dict{UUID, VersionSpec}()
+    local deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
+        pkg_versions_map, pkg_versions_per_registry, uuid_to_name, vers
+    for iteration in 1:MAX_SUBPACKAGE_ITERATIONS
+        reqs = copy(base_reqs)
+        fixed = base_fixed
+        for (uuid, spec) in subpackage_reqs
+            reqs[uuid] = haskey(reqs, uuid) ? intersect(reqs[uuid], spec) : spec
+            haskey(names, uuid) || (names[uuid] = something(registered_name(registries, uuid), string(uuid)))
+        end
+        deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed, pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed = deps_graph(env, registries, names, reqs, fixed, julia_version, installed_only; compat_overrides)
+        if resolver_backend() === :sat
+            vers = SATResolve.resolve_versions(
+                deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
+                pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions;
+                pinned, compat_sources, req_sources, diagnose_unsat
+            )
+        else
+            # behind an inference barrier, so that the precompile workload does not
+            # compile the legacy resolver into Pkg's image: it is opt-in, and its
+            # first use may take the compile latency
+            vers = Base.inferencebarrier(maxsum_resolve_versions)(
+                deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
+                pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions
+            )::Dict{UUID, VersionNumber}
+        end
+
+        new_reqs = subpackage_requirements(env, registries, pkgs, vers, julia_version)
+        new_reqs == subpackage_reqs && break
+        iteration == MAX_SUBPACKAGE_ITERATIONS &&
+            pkgerror("the requirements of the subpackages in use did not settle after $iteration resolves")
+        subpackage_reqs = new_reqs
     end
 
     # Fixup jlls that got their build numbers stripped
@@ -2545,9 +2747,69 @@ function prune_manifest(env::EnvCache)
                 push!(keep, project.uuid)
             end
         end
+        # the weak dependencies that the subpackages in use need are not in anyone's `deps`
+        while true
+            prune_deps(env.manifest, keep)
+            extra = subpackage_kept_deps(env, env.manifest, keep)
+            isempty(extra) && break
+            union!(keep, extra)
+        end
         env.manifest = prune_manifest(env.manifest, keep)
     end
     return env.manifest
+end
+
+# Which subpackages of which packages the environment uses, by the `[subdeps]` of the
+# projects in the workspace and of the packages in `keep` (as their manifest entries record them)
+function manifest_subpackage_selection(env::EnvCache, manifest::Manifest, keep::Set{UUID})
+    selection = Dict{UUID, Set{String}}()
+    function add!(subdeps, deps...)
+        for (name, subs) in subdeps
+            uuid = nothing
+            for d in deps
+                uuid = get(d, name, nothing)
+                uuid === nothing || break
+            end
+            uuid === nothing || union!(get!(Set{String}, selection, uuid), subs)
+        end
+    end
+    add!(env.project.subdeps, env.project.deps, env.project._deps_weak)
+    for (_, project) in env.workspace
+        add!(project.subdeps, project.deps, project._deps_weak)
+    end
+    for uuid in keep
+        entry = manifest_info(manifest, uuid)
+        entry === nothing || add!(entry.subdeps, entry.deps)
+    end
+    return selection
+end
+
+# The dependencies in the manifest that the selected subpackages of the packages in `keep`
+# need, and that are not in `keep` yet
+function subpackage_kept_deps(env::EnvCache, manifest::Manifest, keep::Set{UUID})
+    extra = Set{UUID}()
+    selection = manifest_subpackage_selection(env, manifest, keep)
+    for (uuid, subs) in selection
+        uuid in keep || continue
+        entry = manifest_info(manifest, uuid)
+        entry === nothing && continue
+        needed = nothing
+        if !isempty(entry.subpackages)
+            needed = subpackage_dep_uuids(entry, subs)
+        else
+            path = source_path(env.manifest_file, entry)
+            if path !== nothing && isdir(path)
+                project_file = projectfile_path(path; strict = true)
+                project_file === nothing || (needed = subpackage_dep_uuids(read_project(project_file), subs))
+            end
+        end
+        # without the source at hand, keep all of its weak dependencies that are there
+        needed === nothing && (needed = Set{UUID}(values(entry.weakdeps)))
+        for dep in needed
+            dep in keep || !haskey(manifest, dep) || push!(extra, dep)
+        end
+    end
+    return extra
 end
 
 function prune_manifest(manifest::Manifest, keep::Set{UUID})
@@ -4697,6 +4959,12 @@ end
         push!(package_statuses, PackageStatusData(uuid, old, new, pkg_downloaded, pkg_upgradable, pkg_heldback, cinfo, changed, ext_info, deprecation_info))
     end
 
+    # The subpackages in use: those the project selects, or (for the manifest) those that
+    # anything in the environment selects
+    subpackage_selection = manifest ?
+        manifest_subpackage_selection(env, env.manifest, Set{UUID}(keys(env.manifest))) :
+        manifest_subpackage_selection(env, Manifest(), Set{UUID}())
+
     for pkg in package_statuses
         pad = Ref(0)
         print_padding(x) = (print(io, x); pad[] += 1)
@@ -4720,6 +4988,12 @@ end
         printstyled(io, "[", string(pkg.uuid)[1:8], "] "; color = :light_black)
 
         diff ? print_diff(io, pkg.old, pkg.new) : print_single(io, pkg.new)
+
+        # show the subpackages in use, `Solvers v1.2.0 ::{BDF, Plots}`
+        subs = get(subpackage_selection, pkg.uuid, nothing)
+        if subs !== nothing && !isempty(subs) && pkg.new !== nothing
+            printstyled(io, " ::{", join(sort!(collect(subs)), ", "), "}"; color = :cyan)
+        end
 
         # show if package is yanked
         pkg_spec = something(pkg.new, pkg.old)

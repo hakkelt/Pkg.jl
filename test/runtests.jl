@@ -65,6 +65,7 @@ module PkgTestsInner
         "registry.jl",
         "subdir.jl",
         "extensions.jl",
+        "subpackages.jl",
         "binaryplatforms.jl",
         "platformengines.jl",
         "resolve.jl",

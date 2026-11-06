@@ -163,6 +163,38 @@ read_project_workspace(raw, project::Project) =
     pkgerror("Expected `workspace` section to be a key-value list")
 
 
+read_project_subpackages(::Nothing) = Dict{String, Any}()
+function read_project_subpackages(raw::Dict)
+    for (name, entry) in raw
+        ok = entry isa Union{String, Vector} || (entry isa Dict && get(entry, "deps", String[]) isa Union{String, Vector})
+        ok || pkgerror("Expected subpackage `$name` to be a list of dependencies or a table with a `deps` list")
+    end
+    return Dict{String, Any}(raw)
+end
+read_project_subpackages(raw) = pkgerror("Expected `subpackages` section to be a key-value list")
+
+read_project_subdeps(::Nothing) = Dict{String, Vector{String}}()
+function read_project_subdeps(raw::Dict)
+    subdeps = Dict{String, Vector{String}}()
+    for (name, subs) in raw
+        subs isa String && (subs = [subs])
+        (subs isa Vector && all(x -> x isa String, subs)) ||
+            pkgerror("Expected `subdeps` entry `$name` to be a list of subpackage names")
+        subdeps[name] = unique!(sort!(String[x for x in subs]))
+    end
+    return subdeps
+end
+read_project_subdeps(raw) = pkgerror("Expected `subdeps` section to be a key-value list")
+
+# The dependencies listed for subpackage `name`: names of [deps], [weakdeps] or sibling subpackages
+subpackage_deps(project::Project, name::String) = subpackage_deps(project.subpackages, name)
+function subpackage_deps(subpackages::Dict{String, Any}, name::String)
+    entry = subpackages[name]
+    entry isa Dict && (entry = get(entry, "deps", String[]))
+    entry isa String && return String[entry]
+    return String[x for x in entry::Vector]
+end
+
 function validate(project::Project; file = nothing)
     # deps
     location_string = file === nothing ? "" : " at $(repr(file))."
@@ -211,6 +243,15 @@ function validate(project::Project; file = nothing)
         haskey(project.deps, name) || haskey(project.weakdeps, name) ||
             pkgerror("Compat override `$name` not listed in `deps` or `weakdeps` section" * location_string)
     end
+    # subpackages and subdeps
+    for name in keys(project.subpackages), dep in subpackage_deps(project, name)
+        haskey(project.deps, dep) || haskey(project.weakdeps, dep) || haskey(project.subpackages, dep) ||
+            pkgerror("Subpackage `$name` depends on `$dep`, which is not listed in `deps`, `weakdeps` or `subpackages`" * location_string)
+    end
+    for name in keys(project.subdeps)
+        haskey(project.deps, name) || haskey(project._deps_weak, name) ||
+            pkgerror("Subdeps `$name` not listed in `deps` section" * location_string)
+    end
     # sources
     listed_nonweak = listed_deps(project; include_weak = false)
     for name in keys(project.sources)
@@ -239,6 +280,8 @@ end
     project.deps = read_project_deps(get(raw, "deps", nothing), "deps")
     project.weakdeps = read_project_deps(get(raw, "weakdeps", nothing), "weakdeps")
     project.exts = get(Dict{String, String}, raw, "extensions")
+    project.subpackages = read_project_subpackages(get(raw, "subpackages", nothing))
+    project.subdeps = read_project_subdeps(get(raw, "subdeps", nothing))
     project.sources = read_project_sources(get(raw, "sources", nothing), project)
     project.extras = read_project_deps(get(raw, "extras", nothing), "extras")
     project.compat = read_project_compat(get(raw, "compat", nothing), project; file)
@@ -326,6 +369,8 @@ function destructure(project::Project)::Dict
         end
     end
     entry!("sources", normalized_sources)
+    entry!("subpackages", project.subpackages)
+    entry!("subdeps", project.subdeps)
     entry!("extras", project.extras)
     entry!("compat", Dict(name => x.str for (name, x) in project.compat))
     entry!("compat-overrides", Dict(name => x.str for (name, x) in project.compat_overrides))
@@ -345,7 +390,7 @@ function destructure(project::Project)::Dict
     return raw
 end
 
-const _project_key_order = ["name", "uuid", "keywords", "license", "desc", "version", "readonly", "workspace", "deps", "weakdeps", "sources", "extensions", "compat", "compat-overrides"]
+const _project_key_order = ["name", "uuid", "keywords", "license", "desc", "version", "readonly", "workspace", "deps", "weakdeps", "sources", "extensions", "subpackages", "subdeps", "compat", "compat-overrides"]
 project_key_order(key::String) =
     something(findfirst(x -> x == key, _project_key_order), length(_project_key_order) + 1)
 
