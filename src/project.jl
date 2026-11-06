@@ -187,8 +187,9 @@ end
 read_project_subdeps(raw) = pkgerror("Expected `subdeps` section to be a key-value list")
 
 # The dependencies listed for subpackage `name`: names of [deps], [weakdeps] or sibling subpackages
-function subpackage_deps(project::Project, name::String)
-    entry = project.subpackages[name]
+subpackage_deps(project::Project, name::String) = subpackage_deps(project.subpackages, name)
+function subpackage_deps(subpackages::Dict{String, Any}, name::String)
+    entry = subpackages[name]
     entry isa Dict && (entry = get(entry, "deps", String[]))
     entry isa String && return String[entry]
     return String[x for x in entry::Vector]

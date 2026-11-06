@@ -253,6 +253,35 @@ see the [Conditional loading of code in packages (Extensions)](@ref Conditional-
 !!! compat
     Extensions require Julia 1.9+.
 
+### [The `[subpackages]` and `[subdeps]` sections](@id subpackages-section)
+
+!!! warning "Prototype"
+    Subpackages are a prototype. Their format may change.
+
+A package lists the subpackages it ships in `[subpackages]`. Each entry names the sibling
+subpackages and `[weakdeps]` that the subpackage needs beyond the parent's `[deps]`, either as a
+list or as a table with a `deps` list and an optional `autoload` key (`true`, or a list of
+trigger packages):
+
+```toml
+[subpackages]
+Common = []
+BDF = ["Common", "Heavy"]
+Plots = { deps = ["BDF"], autoload = true }
+```
+
+The code of subpackage `BDF` is in `sub/BDF.jl` or `sub/BDF/BDF.jl`. A project that uses
+subpackages of its dependencies lists them in `[subdeps]`, keyed by the name of the dependency:
+
+```toml
+[subdeps]
+Solvers = ["BDF"]
+```
+
+Pkg installs the weak dependencies that the selected subpackages need, and only picks versions of
+the parent that have them. `pkg> add Solvers::BDF` adds the entry and `pkg> rm Solvers::BDF`
+removes it. See the [Subpackages](@ref Subpackages) section in the Creating Packages guide.
+
 ### The `[compat]` section
 
 Compatibility constraints for dependencies can be listed in the `[compat]` section. This applies to
@@ -417,6 +446,34 @@ whenever Pkg writes the manifest, so they follow changes to the project file.
 !!! compat
     `environment_id` and `environment_name` are written by Pkg in Julia 1.14+, and their
     presence bumps the manifest format to `"2.2"`.
+
+#### Subpackages in manifest entries
+
+The manifest entry of a package with subpackages copies the `[subpackages]` section of its
+project file, and the entry of a package that uses subpackages copies its `[subdeps]`, as for
+`extensions`:
+
+```toml
+[[deps.Solvers]]
+deps = ["Light"]
+weakdeps = ["Heavy"]
+uuid = "..."
+version = "1.2.3"
+
+    [deps.Solvers.subpackages]
+    Common = []
+    BDF = ["Common", "Heavy"]
+
+[[deps.SolverUser]]
+deps = ["Solvers"]
+uuid = "..."
+version = "0.1.0"
+
+    [deps.SolverUser.subdeps]
+    Solvers = ["BDF"]
+```
+
+Julia finds subpackages and checks their use from these entries.
 
 #### Manifest format versions
 

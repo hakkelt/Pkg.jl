@@ -142,6 +142,12 @@ end
 manifest_entry(uuid) = Pkg.Types.EnvCache().manifest[uuid]
 in_manifest(uuid) = haskey(Pkg.Types.EnvCache().manifest, uuid)
 project_subdeps() = Pkg.Types.EnvCache().project.subdeps
+# the subpackages of `uuid` that something in the environment uses
+function selected_subpackages(uuid)
+    env = Pkg.Types.EnvCache()
+    selection = Pkg.Operations.manifest_subpackage_selection(env, env.manifest, Set(keys(env.manifest)))
+    return sort!(collect(get(Set{String}, selection, uuid)))
+end
 # Base support for loading subpackages is a separate change; skip the loading checks without it
 const BASE_HAS_SUBPACKAGES = isdefined(Base, Symbol("@subpackage"))
 # run `code` in a new process, in the active environment and the test's depot
@@ -173,9 +179,15 @@ run_in_env(code) = read(
                 Pkg.activate(; temp = true)
                 Pkg.add("Solvers::BDF")
                 @test project_subdeps() == Dict("Solvers" => ["BDF"])
-                @test manifest_entry(SOLVERS_UUID).subpackages == ["BDF"]
+                @test selected_subpackages(SOLVERS_UUID) == ["BDF"]
                 @test in_manifest(HEAVY_UUID)
                 @test !in_manifest(LIGHT_UUID)
+                # the manifest entry records the parent's subpackage definitions
+                @test issubset(["BDF", "Common"], keys(manifest_entry(SOLVERS_UUID).subpackages))
+                @test Pkg.Types.subpackage_deps(manifest_entry(SOLVERS_UUID).subpackages, "BDF") == ["Common", "Heavy"]
+                # status shows the subpackages in use
+                @test occursin(r"Solvers v\S+ ::\{BDF\}", sprint(io -> Pkg.status(; io)))
+                @test occursin(r"Solvers v\S+ ::\{BDF\}", sprint(io -> Pkg.status(; io, mode = Pkg.PKGMODE_MANIFEST)))
                 # the project file round-trips
                 @test Pkg.Types.read_project(Pkg.project().path).subdeps == Dict("Solvers" => ["BDF"])
                 if BASE_HAS_SUBPACKAGES
@@ -187,7 +199,7 @@ run_in_env(code) = read(
                 Pkg.add("Solvers::Rosenbrock")
                 @test project_subdeps() == Dict("Solvers" => ["BDF", "Rosenbrock"])
                 @test manifest_entry(SOLVERS_UUID).version == v"1.1.0"
-                @test manifest_entry(SOLVERS_UUID).subpackages == ["BDF", "Rosenbrock"]
+                @test selected_subpackages(SOLVERS_UUID) == ["BDF", "Rosenbrock"]
                 @test in_manifest(LIGHT_UUID)
 
                 # rm Parent::Sub keeps the package and drops what only that subpackage needed
@@ -199,7 +211,7 @@ run_in_env(code) = read(
                 Pkg.rm("Solvers::Rosenbrock")
                 @test isempty(project_subdeps())
                 @test !in_manifest(LIGHT_UUID)
-                @test isempty(manifest_entry(SOLVERS_UUID).subpackages)
+                @test isempty(selected_subpackages(SOLVERS_UUID))
             end
 
             @testset "versions without the subpackage are ruled out" begin
@@ -226,7 +238,11 @@ run_in_env(code) = read(
                 Pkg.activate(; temp = true)
                 Pkg.add("SolverUser")
                 @test isempty(project_subdeps())
-                @test manifest_entry(SOLVERS_UUID).subpackages == ["BDF"]
+                @test manifest_entry(USER_UUID).subdeps == Dict("Solvers" => ["BDF"])
+                # the project does not use any subpackage itself, but the manifest does
+                @test !occursin("::{", sprint(io -> Pkg.status(; io)))
+                @test occursin("::{BDF}", sprint(io -> Pkg.status(; io, mode = Pkg.PKGMODE_MANIFEST)))
+                @test selected_subpackages(SOLVERS_UUID) == ["BDF"]
                 @test in_manifest(HEAVY_UUID)
                 @test !in_manifest(LIGHT_UUID)
                 if BASE_HAS_SUBPACKAGES
@@ -239,7 +255,7 @@ run_in_env(code) = read(
                 Pkg.activate(; temp = true)
                 Pkg.develop(path = solvers_path)
                 Pkg.add("Solvers::Rosenbrock")
-                @test manifest_entry(SOLVERS_UUID).subpackages == ["Rosenbrock"]
+                @test selected_subpackages(SOLVERS_UUID) == ["Rosenbrock"]
                 @test in_manifest(LIGHT_UUID)
                 @test !in_manifest(HEAVY_UUID)
                 @test_throws Pkg.Types.PkgError Pkg.add("Solvers::Nope")
