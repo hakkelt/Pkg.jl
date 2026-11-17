@@ -200,6 +200,7 @@ run_in_env(code) = read(
                 @test project_subdeps() == Dict("Solvers" => ["BDF", "Rosenbrock"])
                 @test manifest_entry(SOLVERS_UUID).version == v"1.1.0"
                 @test selected_subpackages(SOLVERS_UUID) == ["BDF", "Rosenbrock"]
+                @test occursin(r"Solvers v\S+ ::\{BDF,Rosenbrock\}", sprint(io -> Pkg.status(; io)))
                 @test in_manifest(LIGHT_UUID)
 
                 # rm Parent::Sub keeps the package and drops what only that subpackage needed
@@ -259,6 +260,22 @@ run_in_env(code) = read(
                 @test in_manifest(LIGHT_UUID)
                 @test !in_manifest(HEAVY_UUID)
                 @test_throws Pkg.Types.PkgError Pkg.add("Solvers::Nope")
+            end
+
+            @testset "the parent's own environment includes all of its subpackages" begin
+                parent_dir = joinpath(dir, "SolversCopy")
+                cp(solvers_path, parent_dir)
+                Pkg.activate(parent_dir)
+                Pkg.resolve()
+                @test selected_subpackages(SOLVERS_UUID) == ["BDF", "Common", "Rosenbrock"]
+                @test in_manifest(HEAVY_UUID)
+                @test in_manifest(LIGHT_UUID)
+                @test isempty(project_subdeps())
+                if BASE_HAS_SUBPACKAGES
+                    # loading needs no [subdeps] declaration there
+                    out = run_in_env("Base.@subpackage using Solvers::BDF; print(BDF.solve())")
+                    @test out == "bdf via heavy"
+                end
             end
 
             @testset "REPL" begin

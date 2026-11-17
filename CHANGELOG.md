@@ -7,7 +7,8 @@ Pkg v1.14 Release Notes
   `Pkg.rm("Solvers::BDF")` stops using it. Only the weak dependencies that the subpackages in use need are
   installed and versions of the parent without them are ruled out. Manifest entries copy the `[subpackages]`
   and `[subdeps]` sections of their package, which Julia reads to load subpackages. `Pkg.status` shows the
-  subpackages in use, as in `Solvers v1.2.3 ::{BDF}`. Registries describe them in `Subpackages.toml` and
+  subpackages in use, as in `Solvers v1.2.3 ::{BDF,Tsit5}`. A package's own environment includes all of its
+  subpackages. Registries describe them in `Subpackages.toml` and
   `Subdeps.toml`.
 - Pkg now resolves package versions with the exact SAT-based resolver from
   [Resolver.jl](https://github.com/JuliaLang/Resolver.jl). It finds the same solutions as the previous

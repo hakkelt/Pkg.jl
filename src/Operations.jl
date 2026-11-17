@@ -1146,6 +1146,25 @@ function subpackage_source_project(env::EnvCache, pkg::PackageSpec)
     return project_file === nothing ? nothing : read_project(project_file)
 end
 
+# The project of package `uuid` if it is the active project or a member of its workspace,
+# that is, if this is the package's own environment
+function own_project(env::EnvCache, uuid::UUID)
+    env.project.uuid == uuid && return env.project
+    for (_, project) in env.workspace
+        project.uuid == uuid && return project
+    end
+    return nothing
+end
+
+# A package's own environment implicitly includes all of its subpackages
+function add_own_subpackages!(selection::Dict{UUID, Set{String}}, env::EnvCache)
+    for project in Iterators.flatten(((env.project,), values(env.workspace)))
+        (project.uuid === nothing || isempty(project.subpackages)) && continue
+        union!(get!(Set{String}, selection, project.uuid), keys(project.subpackages))
+    end
+    return selection
+end
+
 function registry_pkg_info(registries::Vector{Registry.RegistryInstance}, uuid::UUID, version::Union{Nothing, VersionNumber} = nothing)
     for reg in registries
         reg_pkg = get(reg, uuid, nothing)
@@ -1174,6 +1193,7 @@ function collect_subpackage_selection(env::EnvCache, registries::Vector{Registry
     end
     add_project!(env.project)
     foreach(add_project!, values(env.workspace))
+    add_own_subpackages!(selection, env)
     seen = Set{UUID}()
     for pkg in pkgs
         pkg.uuid === nothing && continue
@@ -1260,12 +1280,13 @@ function subpackage_requirements(env::EnvCache, registries::Vector{Registry.Regi
     pkg_by_uuid = Dict{UUID, PackageSpec}(pkg.uuid => pkg for pkg in pkgs if pkg.uuid !== nothing)
     for (uuid, subs) in selection
         pkg = get(pkg_by_uuid, uuid, nothing)
-        if pkg !== nothing && !is_tracking_registry(pkg)
-            project = subpackage_source_project(env, pkg)
+        own = own_project(env, uuid)
+        if own !== nothing || (pkg !== nothing && !is_tracking_registry(pkg))
+            project = own !== nothing ? own : subpackage_source_project(env, pkg)
             project === nothing && continue
             missing_subs = filter(s -> !haskey(project.subpackages, s), sort!(collect(subs)))
             isempty(missing_subs) ||
-                pkgerror("package $(err_rep(pkg)) has no subpackage(s) $(join(missing_subs, ", ")), which the environment uses")
+                pkgerror("package $(something(project.name, string(uuid))) has no subpackage(s) $(join(missing_subs, ", ")), which the environment uses")
             for dep in subpackage_dep_uuids(project, subs)
                 extra[dep] = get(extra, dep, VersionSpec())
             end
@@ -2781,6 +2802,7 @@ function manifest_subpackage_selection(env::EnvCache, manifest::Manifest, keep::
         entry = manifest_info(manifest, uuid)
         entry === nothing || add!(entry.subdeps, entry.deps)
     end
+    add_own_subpackages!(selection, env)
     return selection
 end
 
@@ -2791,6 +2813,13 @@ function subpackage_kept_deps(env::EnvCache, manifest::Manifest, keep::Set{UUID}
     selection = manifest_subpackage_selection(env, manifest, keep)
     for (uuid, subs) in selection
         uuid in keep || continue
+        own = own_project(env, uuid)
+        if own !== nothing
+            for dep in subpackage_dep_uuids(own, subs)
+                dep in keep || !haskey(manifest, dep) || push!(extra, dep)
+            end
+            continue
+        end
         entry = manifest_info(manifest, uuid)
         entry === nothing && continue
         needed = nothing
@@ -4989,10 +5018,10 @@ end
 
         diff ? print_diff(io, pkg.old, pkg.new) : print_single(io, pkg.new)
 
-        # show the subpackages in use, `Solvers v1.2.0 ::{BDF, Plots}`
+        # show the subpackages in use, `Solvers v1.2.0 ::{BDF,Plots}`
         subs = get(subpackage_selection, pkg.uuid, nothing)
         if subs !== nothing && !isempty(subs) && pkg.new !== nothing
-            printstyled(io, " ::{", join(sort!(collect(subs)), ", "), "}"; color = :cyan)
+            printstyled(io, " ::{", join(sort!(collect(subs)), ","), "}"; color = :cyan)
         end
 
         # show if package is yanked

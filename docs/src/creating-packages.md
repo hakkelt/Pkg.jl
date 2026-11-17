@@ -724,15 +724,21 @@ which adds `Solvers` to `[deps]` (if it is not there yet), `BDF` to `[subdeps]`,
 
 ```julia
 using Solvers::BDF                # syntax version 1.15 and later
+using Solvers, Solvers::{BDF, Tsit5}  # several at once, and the parent
 Base.@subpackage using Solvers::BDF   # any syntax version
 ```
 
 loads `BDF` (and `Common`). `pkg> status` shows the subpackages in use after the package version,
-as in `Solvers v1.2.3 ::{BDF}`. A package that uses subpackages of a dependency declares them in its
+as in `Solvers v1.2.3 ::{BDF,Tsit5}`. A package that uses subpackages of a dependency declares them in its
 own `[subdeps]` in the same way; loading a subpackage that is not declared is an error.
 
+The package's own environment, where it is the active project or a member of the workspace,
+includes all of its subpackages: `pkg> resolve` there installs the weak dependencies of every
+subpackage, and they load without a `[subdeps]` declaration.
+
 A subpackage with `autoload = true`, `Plots = { deps = ["BDF"], autoload = true }`, also loads by
-itself once the parent and the weak dependencies it needs are loaded, like an extension.
+itself once the parent and the weak dependencies it needs are loaded, like an extension. As for any
+subpackage, it is installed (and so autoloads) only where the environment uses it.
 
 ## Package naming guidelines
 
