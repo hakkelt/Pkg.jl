@@ -720,7 +720,8 @@ A user of the package adds the subpackages it needs:
 ```
 
 which adds `Solvers` to `[deps]` (if it is not there yet), `BDF` to `[subdeps]`, and installs
-`Heavy`. Then
+`Heavy`. Several subpackages can be named at once, as in `pkg> add Solvers::{BDF, Tsit5}` or
+`Pkg.add("Solvers::{BDF,Tsit5}")`, and `rm` accepts the same forms. Then
 
 ```julia
 using Solvers::BDF                # syntax version 1.15 and later

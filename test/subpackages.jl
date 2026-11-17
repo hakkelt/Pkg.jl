@@ -285,6 +285,22 @@ run_in_env(code) = read(
                 pkg"rm Solvers::BDF"
                 @test isempty(project_subdeps())
                 @test in_manifest(SOLVERS_UUID)
+                # several subpackages at once, with or without spaces
+                pkg"add Solvers::{BDF, Rosenbrock}"
+                @test sort(project_subdeps()["Solvers"]) == ["BDF", "Rosenbrock"]
+                @test in_manifest(HEAVY_UUID) && in_manifest(LIGHT_UUID)
+                pkg"rm Solvers::{BDF,Rosenbrock}"
+                @test isempty(project_subdeps())
+                @test !in_manifest(HEAVY_UUID) && !in_manifest(LIGHT_UUID)
+                # the braces are one word; commas outside them still separate packages
+                words(cmd) = [q.raw for q in only(Pkg.REPLMode.tokenize(cmd))]
+                @test words("add Heavy, Solvers::{BDF, Common} Light") == ["add", "Heavy", "Solvers::{BDF,Common}", "Light"]
+                # and the functional API
+                Pkg.add("Solvers::{BDF,Common}")
+                @test sort(project_subdeps()["Solvers"]) == ["BDF", "Common"]
+                Pkg.rm("Solvers::{BDF, Common}")
+                @test isempty(project_subdeps())
+                @test_throws Pkg.Types.PkgError Pkg.add("Solvers::{}")
             end
         end
     end

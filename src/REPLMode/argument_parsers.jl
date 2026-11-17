@@ -293,9 +293,9 @@ function parse_package_spec_new(input::String)
         input = input[2:(end - 1)]
     end
 
-    # A subpackage, `Parent::Sub` (possibly with a version for the parent), before
-    # `Name:subdir` would take the colons
-    m = match(r"^(\w+::\w+)(?:@(.+))?$", input)
+    # A subpackage, `Parent::Sub` or `Parent::{Sub1,Sub2}` (possibly with a version for
+    # the parent), before `Name:subdir` would take the colons
+    m = match(r"^(\w+::(?:\w+|\{\w+(?:,\w+)*,?\}))(?:@(.+))?$", input)
     if m !== nothing
         tokens = PackageToken[PackageIdentifier(String(something(m.captures[1])))]
         m.captures[2] === nothing || push!(tokens, VersionToken(String(something(m.captures[2]))))
@@ -428,8 +428,8 @@ let uuid = raw"(?i)[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}(
     global const name_re = Regex("^$name\$")
     global const uuid_re = Regex("^$uuid\$")
     global const name_uuid_re = Regex("^$name\\s*=\\s*($uuid)\$")
-    # a subpackage: `Parent::Sub`
-    global const subpackage_re = Regex("^$name::(\\w+)\$")
+    # a subpackage, `Parent::Sub`, or several, `Parent::{Sub1,Sub2}`
+    global const subpackage_re = Regex("^$name::(\\w+|\\{\\w+(?:,\\w+)*,?\\})\$")
 end
 # packages can be identified through: uuid, name, or name+uuid
 # additionally valid for add/develop are: local path, url

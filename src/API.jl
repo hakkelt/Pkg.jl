@@ -504,20 +504,28 @@ end
 
 # Remove the checkouts made by a failed `add` that the environment does not use: a later
 # `add` would find them installed and skip building them (#1236)
-# `Parent::Sub` names subpackage `Sub` of package `Parent`. Returns the package specs with
-# those turned into `Parent` (once per parent), and the subpackages named for each parent.
+# `Parent::Sub` names subpackage `Sub` of package `Parent`, and `Parent::{Sub1, Sub2}`
+# several of them. Returns the package specs with those turned into `Parent` (once per
+# parent), and the subpackages named for each parent.
 function split_subpackage_specs(pkgs::Vector{PackageSpec})
     subpackages = Dict{String, Vector{String}}()
     out = PackageSpec[]
     for pkg in pkgs
         if pkg.name isa String && occursin("::", pkg.name)
             parent, sub = split(pkg.name, "::"; limit = 2)
-            (Base.isidentifier(parent) && Base.isidentifier(sub)) ||
-                pkgerror("`$(pkg.name)` is not a valid subpackage, expected `Parent::Sub`")
+            names = if startswith(sub, '{') && endswith(sub, '}')
+                filter!(!isempty, map(strip, split(sub[2:(end - 1)], ',')))
+            else
+                [sub]
+            end
+            (Base.isidentifier(parent) && !isempty(names) && all(Base.isidentifier, names)) ||
+                pkgerror("`$(pkg.name)` is not a valid subpackage, expected `Parent::Sub` or `Parent::{Sub1, Sub2}`")
             pkg = deepcopy(pkg)
             pkg.name = String(parent)
             subs = get!(Vector{String}, subpackages, pkg.name)
-            sub in subs || push!(subs, String(sub))
+            for sub in names
+                sub in subs || push!(subs, String(sub))
+            end
             # `add A::B A::C` names package `A` once
             any(p -> p.name == pkg.name, out) && continue
         end
