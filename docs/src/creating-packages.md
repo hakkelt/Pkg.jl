@@ -724,9 +724,8 @@ which adds `Solvers` to `[deps]` (if it is not there yet), `BDF` to `[subdeps]`,
 `Pkg.add("Solvers::{BDF,Tsit5}")`, and `rm` accepts the same forms. Then
 
 ```julia
-using Solvers::BDF                # syntax version 1.15 and later
+using Solvers::BDF
 using Solvers, Solvers::{BDF, Tsit5}  # several at once, and the parent
-Base.@subpackage using Solvers::BDF   # any syntax version
 ```
 
 loads `BDF` (and `Common`). `pkg> status` shows the subpackages in use after the package version,

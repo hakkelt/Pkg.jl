@@ -85,7 +85,7 @@ function make_subpackage_registry(dir)
         Solvers = ["BDF"]
         """
     )
-    write(joinpath(user_path, "src", "SolverUser.jl"), "module SolverUser\nBase.@subpackage import Solvers::BDF\nrun() = BDF.solve()\nend\n")
+    write(joinpath(user_path, "src", "SolverUser.jl"), "module SolverUser\nimport Solvers::BDF\nrun() = BDF.solve()\nend\n")
     git_init_and_commit(user_path)
     user_tree = tree_hash_of(user_path)
 
@@ -149,7 +149,7 @@ function selected_subpackages(uuid)
     return sort!(collect(get(Set{String}, selection, uuid)))
 end
 # Base support for loading subpackages is a separate change; skip the loading checks without it
-const BASE_HAS_SUBPACKAGES = isdefined(Base, Symbol("@subpackage"))
+const BASE_HAS_SUBPACKAGES = isdefined(Base, :require_subpackage)
 # run `code` in a new process, in the active environment and the test's depot
 run_in_env(code) = read(
     addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(dirname(Pkg.project().path)) -e $code`,
@@ -191,7 +191,7 @@ run_in_env(code) = read(
                 # the project file round-trips
                 @test Pkg.Types.read_project(Pkg.project().path).subdeps == Dict("Solvers" => ["BDF"])
                 if BASE_HAS_SUBPACKAGES
-                    out = run_in_env("Base.@subpackage using Solvers::BDF; print(BDF.solve())")
+                    out = run_in_env("using Solvers::BDF; print(BDF.solve())")
                     @test out == "bdf via heavy"
                 end
 
@@ -273,7 +273,7 @@ run_in_env(code) = read(
                 @test isempty(project_subdeps())
                 if BASE_HAS_SUBPACKAGES
                     # loading needs no [subdeps] declaration there
-                    out = run_in_env("Base.@subpackage using Solvers::BDF; print(BDF.solve())")
+                    out = run_in_env("using Solvers::BDF; print(BDF.solve())")
                     @test out == "bdf via heavy"
                 end
             end
