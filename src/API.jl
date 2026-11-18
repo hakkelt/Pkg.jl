@@ -423,10 +423,7 @@ function add(
         if isempty(pkgs)
             target == :deps || pkgerror("subpackages can only be added as `deps`")
             check_readonly(ctx)
-            for (name, subs) in subpackages
-                is_dep(name) || continue
-                project.subdeps[name] = sort!(union(get(project.subdeps, name, String[]), subs))
-            end
+            record_subdeps!(project, subpackages)   # (every parent is already a dep)
             resolve(ctx)
             return
         end
@@ -490,9 +487,7 @@ function add(
 
         if !isempty(subpackages)
             target == :deps || pkgerror("subpackages can only be added as `deps`")
-            for (name, subs) in subpackages
-                ctx.env.project.subdeps[name] = sort!(union(get(ctx.env.project.subdeps, name, String[]), subs))
-            end
+            record_subdeps!(ctx.env.project, subpackages)
         end
         Operations.add(ctx, pkgs, new_git; allow_autoprecomp, preserve, platform, target, prefer_loaded_versions, lazy)
     catch
@@ -502,8 +497,6 @@ function add(
     return
 end
 
-# Remove the checkouts made by a failed `add` that the environment does not use: a later
-# `add` would find them installed and skip building them (#1236)
 # `Parent::Sub` names subpackage `Sub` of package `Parent`, and `Parent::{Sub1, Sub2}`
 # several of them. Returns the package specs with those turned into `Parent` (once per
 # parent), and the subpackages named for each parent.
@@ -534,6 +527,16 @@ function split_subpackage_specs(pkgs::Vector{PackageSpec})
     return out, subpackages
 end
 
+# Record in the [subdeps] of `project` the subpackages named for each parent
+function record_subdeps!(project, subpackages::Dict{String, Vector{String}})
+    for (name, subs) in subpackages
+        project.subdeps[name] = sort!(union(get(project.subdeps, name, String[]), subs))
+    end
+    return project
+end
+
+# Remove the checkouts made by a failed `add` that the environment does not use: a later
+# `add` would find them installed and skip building them (#1236)
 function remove_unused_checkouts(ctx::Context, repo_pkgs::Vector{PackageSpec}, new_git::Set{UUID})
     isempty(new_git) && return
     try

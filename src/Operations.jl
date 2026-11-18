@@ -1127,34 +1127,28 @@ function maxsum_resolve_versions(
     return Resolve.resolve(graph)
 end
 
-# Resolve a set of versions given package version specs
-# looks at uuid, version, repo/path,
-# sets version to a VersionNumber
-# adds any other packages which may be in the dependency graph
-# all versioned packages should have a `tree_hash`
-const MAX_SUBPACKAGE_ITERATIONS = 5
-
-# The project file of a package that is tracking a path or a repo, or of the active project
-function subpackage_source_project(env::EnvCache, pkg::PackageSpec)
-    Types.is_project_uuid(env, pkg.uuid) && return env.project
-    for (_, project) in env.workspace
-        project.uuid == pkg.uuid && return project
-    end
-    path = source_path(env.manifest_file, pkg)
-    (path === nothing || !isdir(path)) && return nothing
-    project_file = projectfile_path(path; strict = true)
-    return project_file === nothing ? nothing : read_project(project_file)
-end
 
 # The project of package `uuid` if it is the active project or a member of its workspace,
 # that is, if this is the package's own environment
 function own_project(env::EnvCache, uuid::UUID)
-    env.project.uuid == uuid && return env.project
+    Types.is_project_uuid(env, uuid) && return env.project
     for (_, project) in env.workspace
         project.uuid == uuid && return project
     end
     return nothing
 end
+
+# The project file of a package that is tracking a path or a repo
+function read_source_project(manifest_file::String, pkg::Union{PackageSpec, PackageEntry})
+    path = source_path(manifest_file, pkg)
+    (path === nothing || !isdir(path)) && return nothing
+    project_file = projectfile_path(path; strict = true)
+    return project_file === nothing ? nothing : read_project(project_file)
+end
+
+# The project file of a package that is tracking a path or a repo, or of its own environment
+subpackage_source_project(env::EnvCache, pkg::PackageSpec) =
+    something(own_project(env, pkg.uuid), read_source_project(env.manifest_file, pkg), Some(nothing))
 
 # A package's own environment implicitly includes all of its subpackages
 function add_own_subpackages!(selection::Dict{UUID, Set{String}}, env::EnvCache)
@@ -1313,6 +1307,13 @@ function subpackage_requirements(env::EnvCache, registries::Vector{Registry.Regi
     end
     return extra
 end
+
+# Resolve a set of versions given package version specs
+# looks at uuid, version, repo/path,
+# sets version to a VersionNumber
+# adds any other packages which may be in the dependency graph
+# all versioned packages should have a `tree_hash`
+const MAX_SUBPACKAGE_ITERATIONS = 5
 
 function resolve_versions!(
         env::EnvCache, registries::Vector{Registry.RegistryInstance}, pkgs::Vector{PackageSpec}, @nospecialize(julia_version::Union{VersionNumber, Nothing}),
@@ -2826,11 +2827,8 @@ function subpackage_kept_deps(env::EnvCache, manifest::Manifest, keep::Set{UUID}
         if !isempty(entry.subpackages)
             needed = subpackage_dep_uuids(entry, subs)
         else
-            path = source_path(env.manifest_file, entry)
-            if path !== nothing && isdir(path)
-                project_file = projectfile_path(path; strict = true)
-                project_file === nothing || (needed = subpackage_dep_uuids(read_project(project_file), subs))
-            end
+            project = read_source_project(env.manifest_file, entry)
+            project === nothing || (needed = subpackage_dep_uuids(project, subs))
         end
         # without the source at hand, keep all of its weak dependencies that are there
         needed === nothing && (needed = Set{UUID}(values(entry.weakdeps)))

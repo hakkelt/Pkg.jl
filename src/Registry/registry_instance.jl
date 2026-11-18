@@ -44,8 +44,6 @@ struct SubpackageInfo
     deps::Set{UUID}
     siblings::Vector{String}
 end
-Base.:(==)(a::SubpackageInfo, b::SubpackageInfo) = a.deps == b.deps && a.siblings == b.siblings
-Base.hash(a::SubpackageInfo, h::UInt) = hash(a.siblings, hash(a.deps, hash(SubpackageInfo, h)))
 
 # This is the information that exists in e.g. General/A/ACME
 struct PkgInfo
