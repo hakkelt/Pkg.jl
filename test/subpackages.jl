@@ -240,6 +240,17 @@ run_in_env(code) = read(
                 @test occursin("no registered version of package Solvers has the subpackage(s) Nope", err.msg)
                 @test_throws Pkg.Types.PkgError Pkg.add("Solvers::")
                 @test_throws Pkg.Types.PkgError Pkg.rm("Solvers::BDF")
+                # a subpackage may not be named like a dependency: the names of both stand
+                # for them in `[subpackages]` and in the triggers of `[extensions]`
+                project = Pkg.Types.read_project(joinpath(solvers_path, "Project.toml"))
+                project.subpackages["Heavy"] = String[]
+                err = try
+                    Pkg.Types.validate(project); nothing
+                catch e
+                    e
+                end
+                @test err isa Pkg.Types.PkgError
+                @test occursin("Subpackage `Heavy` has the same name as the package or one of its dependencies", err.msg)
             end
 
             @testset "a registered package's [subdeps]" begin

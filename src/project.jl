@@ -244,6 +244,13 @@ function validate(project::Project; file = nothing)
             pkgerror("Compat override `$name` not listed in `deps` or `weakdeps` section" * location_string)
     end
     # subpackages and subdeps
+    for name in keys(project.subpackages)
+        # a subpackage is named like a module, and the name stands for it in `[subpackages]`
+        # and in the triggers of `[extensions]`, next to the names of the dependencies
+        if name == project.name || haskey(project.deps, name) || haskey(project.weakdeps, name)
+            pkgerror("Subpackage `$name` has the same name as the package or one of its dependencies" * location_string)
+        end
+    end
     for name in keys(project.subpackages), dep in subpackage_deps(project, name)
         haskey(project.deps, dep) || haskey(project.weakdeps, dep) || haskey(project.subpackages, dep) ||
             pkgerror("Subpackage `$name` depends on `$dep`, which is not listed in `deps`, `weakdeps` or `subpackages`" * location_string)
