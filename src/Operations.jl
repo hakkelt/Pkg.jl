@@ -1150,9 +1150,22 @@ end
 subpackage_source_project(env::EnvCache, pkg::PackageSpec) =
     something(own_project(env, pkg.uuid), read_source_project(env.manifest_file, pkg), Some(nothing))
 
-# A package's own environment implicitly includes all of its subpackages
-function add_own_subpackages!(selection::Dict{UUID, Set{String}}, env::EnvCache)
+# Add the subpackages that the [subdeps] of `source`, a project or a manifest entry, select
+function add_subdeps!(selection::Dict{UUID, Set{String}}, source::Union{Project, PackageEntry})
+    for (name, subs) in source.subdeps
+        uuid = get(source.deps, name, nothing)
+        uuid === nothing && source isa Project && (uuid = get(source._deps_weak, name, nothing))
+        uuid === nothing || union!(get!(Set{String}, selection, uuid), subs)
+    end
+    return selection
+end
+
+# The subpackages that the projects of the workspace select. A package's own environment
+# implicitly includes all of its subpackages.
+function workspace_subpackage_selection(env::EnvCache)
+    selection = Dict{UUID, Set{String}}()
     for project in Iterators.flatten(((env.project,), values(env.workspace)))
+        add_subdeps!(selection, project)
         (project.uuid === nothing || isempty(project.subpackages)) && continue
         union!(get!(Set{String}, selection, project.uuid), keys(project.subpackages))
     end
@@ -1178,23 +1191,14 @@ registered package versions in `versions` (or in `pkgs`, if `versions` lacks the
 """
 function collect_subpackage_selection(env::EnvCache, registries::Vector{Registry.RegistryInstance},
                                       pkgs::Vector{PackageSpec}, versions::Dict{UUID, VersionNumber} = Dict{UUID, VersionNumber}())
-    selection = Dict{UUID, Set{String}}()
-    function add_project!(project::Project)
-        for (name, subs) in project.subdeps
-            uuid = get(project.deps, name, get(project._deps_weak, name, nothing))
-            uuid === nothing || union!(get!(Set{String}, selection, uuid), subs)
-        end
-    end
-    add_project!(env.project)
-    foreach(add_project!, values(env.workspace))
-    add_own_subpackages!(selection, env)
+    selection = workspace_subpackage_selection(env)
     seen = Set{UUID}()
     for pkg in pkgs
         pkg.uuid === nothing && continue
         push!(seen, pkg.uuid)
         if !is_tracking_registry(pkg)
             project = subpackage_source_project(env, pkg)
-            project === nothing || add_project!(project)
+            project === nothing || add_subdeps!(selection, project)
         else
             version = get(versions, pkg.uuid, pkg.version)
             version isa VersionNumber || continue
@@ -2784,26 +2788,11 @@ end
 # Which subpackages of which packages the environment uses, by the `[subdeps]` of the
 # projects in the workspace and of the packages in `keep` (as their manifest entries record them)
 function manifest_subpackage_selection(env::EnvCache, manifest::Manifest, keep::Set{UUID})
-    selection = Dict{UUID, Set{String}}()
-    function add!(subdeps, deps...)
-        for (name, subs) in subdeps
-            uuid = nothing
-            for d in deps
-                uuid = get(d, name, nothing)
-                uuid === nothing || break
-            end
-            uuid === nothing || union!(get!(Set{String}, selection, uuid), subs)
-        end
-    end
-    add!(env.project.subdeps, env.project.deps, env.project._deps_weak)
-    for (_, project) in env.workspace
-        add!(project.subdeps, project.deps, project._deps_weak)
-    end
+    selection = workspace_subpackage_selection(env)
     for uuid in keep
         entry = manifest_info(manifest, uuid)
-        entry === nothing || add!(entry.subdeps, entry.deps)
+        entry === nothing || add_subdeps!(selection, entry)
     end
-    add_own_subpackages!(selection, env)
     return selection
 end
 
@@ -4990,7 +4979,7 @@ end
     # anything in the environment selects
     subpackage_selection = manifest ?
         manifest_subpackage_selection(env, env.manifest, Set{UUID}(keys(env.manifest))) :
-        manifest_subpackage_selection(env, Manifest(), Set{UUID}())
+        workspace_subpackage_selection(env)
 
     for pkg in package_statuses
         pad = Ref(0)
