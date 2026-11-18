@@ -497,29 +497,14 @@ function add(
     return
 end
 
-# `Parent::Sub` names subpackage `Sub` of package `Parent`, and `Parent::{Sub1, Sub2}`
-# several of them. Returns the package specs with those turned into `Parent` (once per
-# parent), and the subpackages named for each parent.
+# The subpackages that `pkgs` name (`Parent::Sub`), by parent, and `pkgs` with each of those
+# parents once: `add A::B A::C` names package `A` once
 function split_subpackage_specs(pkgs::Vector{PackageSpec})
     subpackages = Dict{String, Vector{String}}()
     out = PackageSpec[]
     for pkg in pkgs
-        if pkg.name isa String && occursin("::", pkg.name)
-            parent, sub = split(pkg.name, "::"; limit = 2)
-            names = if startswith(sub, '{') && endswith(sub, '}')
-                filter!(!isempty, map(strip, split(sub[2:(end - 1)], ',')))
-            else
-                [sub]
-            end
-            (Base.isidentifier(parent) && !isempty(names) && all(Base.isidentifier, names)) ||
-                pkgerror("`$(pkg.name)` is not a valid subpackage, expected `Parent::Sub` or `Parent::{Sub1, Sub2}`")
-            pkg = deepcopy(pkg)
-            pkg.name = String(parent)
-            subs = get!(Vector{String}, subpackages, pkg.name)
-            for sub in names
-                sub in subs || push!(subs, String(sub))
-            end
-            # `add A::B A::C` names package `A` once
+        if !isempty(pkg.subpackages)
+            union!(get!(Vector{String}, subpackages, pkg.name::String), pkg.subpackages)
             any(p -> p.name == pkg.name, out) && continue
         end
         push!(out, pkg)
@@ -562,7 +547,7 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec}; mode = PKGMODE_PROJECT, all
     Operations.ensure_manifest_registries!(ctx)
     check_readonly(ctx)
     # `rm Parent::Sub` stops using the subpackage, and keeps the package
-    sub_pkgs = filter(pkg -> pkg.name isa String && occursin("::", pkg.name), pkgs)
+    sub_pkgs = filter(pkg -> !isempty(pkg.subpackages), pkgs)
     if !isempty(sub_pkgs)
         _, subpackages = split_subpackage_specs(sub_pkgs)
         for (name, subs) in subpackages

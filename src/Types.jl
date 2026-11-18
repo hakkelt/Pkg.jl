@@ -100,6 +100,8 @@ mutable struct PackageSpec
     url::Union{Nothing, String}
     rev::Union{Nothing, String}
     subdir::Union{Nothing, String}
+    # the subpackages named with `Parent::Sub` or `Parent::{Sub1, Sub2}`
+    subpackages::Vector{String}
 end
 function PackageSpec(;
         name::Union{Nothing, AbstractString} = nothing,
@@ -112,9 +114,30 @@ function PackageSpec(;
         url = nothing,
         rev = nothing,
         subdir = nothing,
+        subpackages::AbstractVector{<:AbstractString} = String[],
     )
     uuid = uuid === nothing ? nothing : UUID(uuid)
-    return PackageSpec(name, uuid, version, tree_hash, repo, path, pinned, url, rev, subdir)
+    subpackages = String[s for s in subpackages]
+    if name !== nothing && occursin("::", name)
+        name, named = parse_subpackage_name(name)
+        union!(subpackages, named)
+    end
+    return PackageSpec(name, uuid, version, tree_hash, repo, path, pinned, url, rev, subdir, subpackages)
+end
+
+# `Parent::Sub` names subpackage `Sub` of package `Parent`, and `Parent::{Sub1, Sub2}`
+# several of them: the name of the parent and those of the subpackages
+function parse_subpackage_name(str::AbstractString)
+    parent, sub = split(str, "::"; limit = 2)
+    parent = chopsuffix(parent, ".jl")
+    names = if startswith(sub, '{') && endswith(sub, '}')
+        filter!(!isempty, map(strip, split(sub[2:(end - 1)], ',')))
+    else
+        [sub]
+    end
+    (Base.isidentifier(parent) && !isempty(names) && all(Base.isidentifier, names)) ||
+        pkgerror("`$str` is not a valid subpackage, expected `Parent::Sub` or `Parent::{Sub1, Sub2}`")
+    return String(parent), unique!(String.(names))
 end
 PackageSpec(name::AbstractString) = PackageSpec(; name = name)::PackageSpec
 PackageSpec(name::AbstractString, uuid::UUID) = PackageSpec(; name = name, uuid = uuid)::PackageSpec
@@ -154,6 +177,7 @@ function Base.show(io::IO, pkg::PackageSpec)
     pkg.url !== nothing && push!(f, "url" => pkg.url)
     pkg.rev !== nothing && push!(f, "rev" => pkg.rev)
     pkg.subdir !== nothing && push!(f, "subdir" => pkg.subdir)
+    isempty(pkg.subpackages) || push!(f, "subpackages" => join(pkg.subpackages, ", "))
     pkg.pinned && push!(f, "pinned" => pkg.pinned)
     push!(f, "version" => (vstr == "VersionSpec(\"*\")" ? "*" : vstr))
     if pkg.repo.source !== nothing

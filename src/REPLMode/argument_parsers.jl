@@ -295,10 +295,10 @@ function parse_package_spec_new(input::String)
 
     # A subpackage, `Parent::Sub` or `Parent::{Sub1,Sub2}` (possibly with a version for
     # the parent), before `Name:subdir` would take the colons
-    m = match(r"^(\w+::(?:\w+|\{\w+(?:,\w+)*,?\}))(?:@(.+))?$", input)
-    if m !== nothing
-        tokens = PackageToken[PackageIdentifier(String(something(m.captures[1])))]
-        m.captures[2] === nothing || push!(tokens, VersionToken(String(something(m.captures[2]))))
+    if occursin(r"^\w+(?:\.jl)?::", input)
+        name, version = occursin('@', input) ? split(input, '@'; limit = 2) : (input, nothing)
+        tokens = PackageToken[PackageIdentifier(String(name))]
+        version === nothing || push!(tokens, VersionToken(String(version)))
         return tokens
     end
 
@@ -428,8 +428,6 @@ let uuid = raw"(?i)[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}(
     global const name_re = Regex("^$name\$")
     global const uuid_re = Regex("^$uuid\$")
     global const name_uuid_re = Regex("^$name\\s*=\\s*($uuid)\$")
-    # a subpackage, `Parent::Sub`, or several, `Parent::{Sub1,Sub2}`
-    global const subpackage_re = Regex("^$name::(\\w+|\\{\\w+(?:,\\w+)*,?\\})\$")
 end
 # packages can be identified through: uuid, name, or name+uuid
 # additionally valid for add/develop are: local path, url
@@ -450,10 +448,9 @@ function parse_package_identifier(pkg_id::PackageIdentifier; add_or_develop = fa
     end
     if occursin(uuid_re, word)
         return PackageSpec(; uuid = UUID(word))
-    elseif occursin(subpackage_re, word)
-        m = match(subpackage_re, word)
-        # split by `API.add`/`API.rm`
-        return PackageSpec(String(something(m.captures[1])) * "::" * String(something(m.captures[2])))
+    elseif occursin(r"^\w+(?:\.jl)?::", word)
+        # a subpackage, `Parent::Sub`, or several, `Parent::{Sub1,Sub2}`
+        return PackageSpec(word)
     elseif occursin(name_re, word)
         m = match(name_re, word)
         return PackageSpec(String(something(m.captures[1])))
