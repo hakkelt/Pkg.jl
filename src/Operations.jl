@@ -1172,54 +1172,22 @@ function workspace_subpackage_selection(env::EnvCache)
     return selection
 end
 
-function registry_pkg_info(registries::Vector{Registry.RegistryInstance}, uuid::UUID, version::Union{Nothing, VersionNumber} = nothing)
-    for reg in registries
-        reg_pkg = get(reg, uuid, nothing)
-        reg_pkg === nothing && continue
-        info = Registry.registry_info(reg, reg_pkg)
-        (version === nothing || haskey(info.version_info, version)) && return info
-    end
-    return nothing
-end
-
 """
-    collect_subpackage_selection(env, registries, pkgs, versions)
+    fixed_subpackage_selection(env, pkgs)
 
-Which subpackages of which packages the environment uses: the `[subdeps]` of the
-projects in the workspace, of the packages that track a path or a repo, and of the
-registered package versions in `versions` (or in `pkgs`, if `versions` lacks them).
+The subpackages that the environment uses whichever versions are picked: those that the
+`[subdeps]` of the workspace projects and of the packages in `pkgs` that track a path or a
+repo select (see [`workspace_subpackage_selection`](@ref)). Registered versions select
+subpackages through edges of the resolver graph (see [`SubpackageNode`](@ref)).
 """
-function collect_subpackage_selection(env::EnvCache, registries::Vector{Registry.RegistryInstance},
-                                      pkgs::Vector{PackageSpec}, versions::Dict{UUID, VersionNumber} = Dict{UUID, VersionNumber}())
+function fixed_subpackage_selection(env::EnvCache, pkgs::Vector{PackageSpec})
     selection = workspace_subpackage_selection(env)
-    seen = Set{UUID}()
     for pkg in pkgs
-        pkg.uuid === nothing && continue
-        push!(seen, pkg.uuid)
-        if !is_tracking_registry(pkg)
-            project = subpackage_source_project(env, pkg)
-            project === nothing || add_subdeps!(selection, project)
-        else
-            version = get(versions, pkg.uuid, pkg.version)
-            version isa VersionNumber || continue
-            add_registered_subdeps!(selection, registries, pkg.uuid, version)
-        end
-    end
-    # registered packages that the resolver added
-    for (uuid, version) in versions
-        uuid in seen && continue
-        add_registered_subdeps!(selection, registries, uuid, version)
+        (pkg.uuid === nothing || is_tracking_registry(pkg)) && continue
+        project = subpackage_source_project(env, pkg)
+        project === nothing || add_subdeps!(selection, project)
     end
     return selection
-end
-
-function add_registered_subdeps!(selection, registries, uuid::UUID, version::VersionNumber)
-    info = registry_pkg_info(registries, uuid, version)
-    info === nothing && return
-    for (dep, subs) in Registry.query_subdeps(info, version)
-        union!(get!(Set{String}, selection, dep), subs)
-    end
-    return
 end
 
 # The dependencies (by UUID) that subpackages `subs` need, following sibling subpackages
@@ -1264,52 +1232,97 @@ function subpackage_dep_uuids(info::Dict{String, Registry.SubpackageInfo}, subs)
 end
 
 """
-    subpackage_requirements(env, registries, pkgs, versions, julia_version)
+    SubpackageNode(parent, name)
 
-The extra requirements from the subpackages that the environment uses (see
-[`collect_subpackage_selection`](@ref)): each of their dependencies, and, for a
-registered parent, the versions of it that have all of them.
+Each subpackage `P::S` that something in the environment selects is a node of the resolver
+graph, with the uuid of its `PkgId`, `uuid5(P, S)`. Its versions are the versions of `P` that
+have `S`, and each of them depends on `P` at that same version and on what `S` needs: weak
+dependencies of `P`, also those of the sibling subpackages it needs. What selects `S` depends
+on the node: the workspace projects and the packages that track a path or a repo as
+requirements (see [`fixed_subpackage_selection`](@ref)), and registered versions through the
+`[subdeps]` that the registry records for them. A single resolve then picks versions of `P`
+that have the subpackages in use, together with what those need, and a failed one names
+`P::S`. The nodes are dropped from the result: they are not packages.
 """
-function subpackage_requirements(env::EnvCache, registries::Vector{Registry.RegistryInstance},
-                                 pkgs::Vector{PackageSpec}, versions::Dict{UUID, VersionNumber},
-                                 @nospecialize(julia_version::Union{VersionNumber, Nothing}))
-    selection = collect_subpackage_selection(env, registries, pkgs, versions)
-    extra = Dict{UUID, VersionSpec}()
-    pkg_by_uuid = Dict{UUID, PackageSpec}(pkg.uuid => pkg for pkg in pkgs if pkg.uuid !== nothing)
-    for (uuid, subs) in selection
-        pkg = get(pkg_by_uuid, uuid, nothing)
-        own = own_project(env, uuid)
-        if own !== nothing || (pkg !== nothing && !is_tracking_registry(pkg))
-            project = own !== nothing ? own : subpackage_source_project(env, pkg)
-            project === nothing && continue
-            missing_subs = filter(s -> !haskey(project.subpackages, s), sort!(collect(subs)))
-            isempty(missing_subs) ||
-                pkgerror("package $(something(project.name, string(uuid))) has no subpackage(s) $(join(missing_subs, ", ")), which the environment uses")
-            for dep in subpackage_dep_uuids(project, subs)
-                extra[dep] = get(extra, dep, VersionSpec())
-            end
-        else
-            info = registry_pkg_info(registries, uuid)
-            info === nothing && continue
-            good = VersionNumber[]
-            for v in keys(info.version_info)
-                available = Registry.query_subpackages(info, v)
-                all(s -> haskey(available, s), subs) && push!(good, v)
-            end
-            name = something(registered_name(registries, uuid), string(uuid))
-            isempty(good) &&
-                pkgerror("no registered version of package $name has the subpackage(s) $(join(sort!(collect(subs)), ", ")), which the environment uses")
-            sort!(good)
-            extra[uuid] = intersect(get(extra, uuid, VersionSpec()), VersionSpec([VersionRange(v) for v in good]))
-            # the dependencies of the version picked, or of the newest one that qualifies
-            v = get(versions, uuid, nothing)
-            v = v !== nothing && v in good ? v : last(good)
-            for dep in subpackage_dep_uuids(Registry.query_subpackages(info, v), subs)
-                extra[dep] = get(extra, dep, VersionSpec())
-            end
+struct SubpackageNode
+    parent::UUID
+    name::String
+end
+subpackage_node_uuid(parent::UUID, name::String) = uuid5(parent, name)
+
+# The dependencies of the versions in `info`, with those on the subpackage nodes that their
+# `[subdeps]` select added (to a copy: the registry data is shared). The nodes of the versions
+# in `valid` are added to `uuids`.
+function deps_with_subdeps(info::Registry.PkgInfo, valid::Set{VersionNumber},
+                           nodes::Dict{UUID, SubpackageNode}, uuids::Set{UUID})
+    isempty(info.subdeps) && return info.deps
+    deps = copy(info.deps)
+    for (vrange, subdeps) in info.subdeps
+        edges = Set{UUID}()
+        for (parent, subs) in subdeps, sub in subs
+            node = subpackage_node_uuid(parent, sub)
+            nodes[node] = SubpackageNode(parent, sub)
+            push!(edges, node)
         end
+        deps[vrange] = union(get(Set{UUID}, deps, vrange), edges)
+        any(v -> v in vrange, valid) && union!(uuids, edges)
     end
-    return extra
+    return deps
+end
+
+# The resolver data of subpackage node `node` (see `SubpackageNode`), from its parent's: per
+# registry, the dependencies and compat of each version, and the versions
+function subpackage_node_data(
+        node::SubpackageNode, registries::Vector{Registry.RegistryInstance}, fixed::Dict{UUID, Resolve.Fixed},
+        fixed_projects::Dict{UUID, Project}, parent_infos::Vector{Registry.PkgInfo},
+        parent_versions::Vector{Set{VersionNumber}}
+    )
+    deps_list = Dict{VersionRange, Set{UUID}}[]
+    compat_list = Dict{VersionRange, Dict{UUID, VersionSpec}}[]
+    versions_list = Set{VersionNumber}[]
+    fx = get(fixed, node.parent, nothing)
+    if fx !== nothing
+        # a single version, which needs no dependency on the (fixed) parent
+        project = get(fixed_projects, node.parent, nothing)
+        if project === nothing || !haskey(project.subpackages, node.name)
+            name = project === nothing ? string(node.parent) : something(project.name, string(node.parent))
+            pkgerror("package $name has no subpackage(s) $(node.name), which the environment uses")
+        end
+        r = VersionRange(fx.version)
+        push!(deps_list, Dict(r => subpackage_dep_uuids(project, (node.name,))))
+        push!(compat_list, Dict(r => Dict{UUID, VersionSpec}()))
+        push!(versions_list, Set([fx.version]))
+        return deps_list, compat_list, versions_list
+    end
+    for (info, valid) in zip(parent_infos, parent_versions)
+        deps = Dict{VersionRange, Set{UUID}}()
+        compat = Dict{VersionRange, Dict{UUID, VersionSpec}}()
+        versions = Set{VersionNumber}()
+        for v in valid
+            subs = Registry.query_subpackages(info, v)
+            haskey(subs, node.name) || continue
+            r = VersionRange(v)
+            deps[r] = push!(subpackage_dep_uuids(subs, (node.name,)), node.parent)
+            compat[r] = Dict(node.parent => VersionSpec(r))
+            push!(versions, v)
+        end
+        push!(deps_list, deps)
+        push!(compat_list, compat)
+        push!(versions_list, versions)
+    end
+    if all(isempty, versions_list)
+        # a missing subpackage, unless the versions that have it were filtered out
+        exists = false
+        for reg in registries
+            pkg = get(reg, node.parent, nothing)
+            pkg === nothing && continue
+            info = Registry.registry_info(reg, pkg)
+            exists |= any(v -> haskey(Registry.query_subpackages(info, v), node.name), keys(info.version_info))
+        end
+        name = something(registered_name(registries, node.parent), string(node.parent))
+        exists || pkgerror("no registered version of package $name has the subpackage(s) $(node.name), which the environment uses")
+    end
+    return deps_list, compat_list, versions_list
 end
 
 # Resolve a set of versions given package version specs
@@ -1317,7 +1330,6 @@ end
 # sets version to a VersionNumber
 # adds any other packages which may be in the dependency graph
 # all versioned packages should have a `tree_hash`
-const MAX_SUBPACKAGE_ITERATIONS = 5
 
 function resolve_versions!(
         env::EnvCache, registries::Vector{Registry.RegistryInstance}, pkgs::Vector{PackageSpec}, @nospecialize(julia_version::Union{VersionNumber, Nothing}),
@@ -1420,43 +1432,54 @@ function resolve_versions!(
             compat_overrides[uuid] = get_compat_override_workspace(env, name)
         end
     end
-    # Subpackages that something in the environment uses turn their weak dependencies
-    # into requirements, and restrict their parent to versions that have them. Which
-    # ones are used depends on the versions picked, so resolve until that settles.
-    base_reqs = copy(reqs)
-    base_fixed = fixed
-    subpackage_reqs = Dict{UUID, VersionSpec}()
-    local deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
-        pkg_versions_map, pkg_versions_per_registry, uuid_to_name, vers
-    for iteration in 1:MAX_SUBPACKAGE_ITERATIONS
-        reqs = copy(base_reqs)
-        fixed = base_fixed
-        for (uuid, spec) in subpackage_reqs
-            reqs[uuid] = haskey(reqs, uuid) ? intersect(reqs[uuid], spec) : spec
-            haskey(names, uuid) || (names[uuid] = something(registered_name(registries, uuid), string(uuid)))
+    # The subpackages in use are nodes of the graph (see `SubpackageNode`), except in a
+    # package's own environment, which uses all of them: what they need is required
+    subpackage_nodes = Dict{UUID, SubpackageNode}()
+    fixed_projects = Dict{UUID, Project}()
+    for project in Iterators.flatten(((env.project,), values(env.workspace)))
+        project.uuid === nothing || (fixed_projects[project.uuid] = project)
+    end
+    for pkg in pkgs
+        (pkg.uuid === nothing || is_tracking_registry(pkg) || haskey(fixed_projects, pkg.uuid)) && continue
+        project = subpackage_source_project(env, pkg)
+        project === nothing || (fixed_projects[pkg.uuid] = project)
+    end
+    for (uuid, subs) in fixed_subpackage_selection(env, pkgs)
+        own = own_project(env, uuid)
+        if own === nothing
+            for sub in subs
+                node = subpackage_node_uuid(uuid, sub)
+                subpackage_nodes[node] = SubpackageNode(uuid, sub)
+                reqs[node] = VersionSpec()
+            end
+            continue
         end
-        deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed, pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed = deps_graph(env, registries, names, reqs, fixed, julia_version, installed_only; compat_overrides)
-        if resolver_backend() === :sat
-            vers = SATResolve.resolve_versions(
-                deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
-                pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions;
-                pinned, compat_sources, req_sources, diagnose_unsat
-            )
-        else
-            # behind an inference barrier, so that the precompile workload does not
-            # compile the legacy resolver into Pkg's image: it is opt-in, and its
-            # first use may take the compile latency
-            vers = Base.inferencebarrier(maxsum_resolve_versions)(
-                deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
-                pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions
-            )::Dict{UUID, VersionNumber}
+        missing_subs = filter(s -> !haskey(own.subpackages, s), sort!(collect(subs)))
+        isempty(missing_subs) ||
+            pkgerror("package $(something(own.name, string(uuid))) has no subpackage(s) $(join(missing_subs, ", ")), which the environment uses")
+        for dep in subpackage_dep_uuids(own, subs)
+            haskey(reqs, dep) || (reqs[dep] = VersionSpec())
+            haskey(names, dep) || (names[dep] = something(registered_name(registries, dep), string(dep)))
         end
-
-        new_reqs = subpackage_requirements(env, registries, pkgs, vers, julia_version)
-        new_reqs == subpackage_reqs && break
-        iteration == MAX_SUBPACKAGE_ITERATIONS &&
-            pkgerror("the requirements of the subpackages in use did not settle after $iteration resolves")
-        subpackage_reqs = new_reqs
+    end
+    deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed, pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed = deps_graph(env, registries, names, reqs, fixed, julia_version, installed_only; compat_overrides, subpackage_nodes, fixed_projects)
+    if resolver_backend() === :sat
+        vers = SATResolve.resolve_versions(
+            deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
+            pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions;
+            pinned, compat_sources, req_sources, diagnose_unsat
+        )
+    else
+        # behind an inference barrier, so that the precompile workload does not
+        # compile the legacy resolver into Pkg's image: it is opt-in, and its
+        # first use may take the compile latency
+        vers = Base.inferencebarrier(maxsum_resolve_versions)(
+            deps_map_compressed, compat_map_compressed, weak_deps_map_compressed, weak_compat_map_compressed,
+            pkg_versions_map, pkg_versions_per_registry, uuid_to_name, reqs, fixed, julia_version, preferred_versions
+        )::Dict{UUID, VersionNumber}
+    end
+    for node in keys(subpackage_nodes)
+        delete!(vers, node)
     end
 
     # Fixup jlls that got their build numbers stripped
@@ -1604,7 +1627,11 @@ const PKGORIGIN_HAVE_VERSION = :version in fieldnames(Base.PkgOrigin)
 function deps_graph(
         env::EnvCache, registries::Vector{Registry.RegistryInstance}, uuid_to_name::Dict{UUID, String},
         reqs::Resolve.Requires, fixed::Dict{UUID, Resolve.Fixed}, @nospecialize(julia_version::Union{VersionNumber, Nothing}),
-        installed_only::Bool; compat_overrides::Dict{UUID, VersionSpec} = Dict{UUID, VersionSpec}()
+        installed_only::Bool; compat_overrides::Dict{UUID, VersionSpec} = Dict{UUID, VersionSpec}(),
+        # the subpackage nodes (see `SubpackageNode`), to which those that registered versions
+        # select are added, and the projects of the fixed packages that define their subpackages
+        subpackage_nodes::Dict{UUID, SubpackageNode} = Dict{UUID, SubpackageNode}(),
+        fixed_projects::Dict{UUID, Project} = Dict{UUID, Project}()
     )
     uuids = Set{UUID}()
     union!(uuids, keys(reqs))
@@ -1638,6 +1665,8 @@ function deps_graph(
     # pkg -> vector of (versions from each registry) - parallel to the compressed data vectors
     # This tracks which versions came from which registry to avoid cross-registry compat pollution
     pkg_versions_per_registry = Dict{UUID, Vector{Set{VersionNumber}}}()
+    # pkg -> the registry data, parallel to the compressed data vectors (for subpackage nodes)
+    pkg_infos = Dict{UUID, Vector{Registry.PkgInfo}}()
 
     for (fp, fx) in fixed
         all_deps_compressed[fp] = [Dict{VersionRange, Set{UUID}}()]
@@ -1652,6 +1681,27 @@ function deps_graph(
         unseen = setdiff(uuids, seen)
         isempty(unseen) && break
         for uuid in unseen
+            node = get(subpackage_nodes, uuid, nothing)
+            if node !== nothing
+                # a subpackage node's versions are its parent's: wait for those
+                if !(node.parent in seen)
+                    push!(uuids, node.parent)
+                    continue
+                end
+                push!(seen, uuid)
+                deps_list, compat_list, versions_list = subpackage_node_data(
+                    node, registries, fixed, fixed_projects,
+                    get(Vector{Registry.PkgInfo}, pkg_infos, node.parent),
+                    get(Vector{Set{VersionNumber}}, pkg_versions_per_registry, node.parent))
+                foreach(d -> foreach(deps_set -> union!(uuids, deps_set), values(d)), deps_list)
+                all_deps_compressed[uuid] = deps_list
+                all_compat_compressed[uuid] = compat_list
+                weak_deps_compressed[uuid] = [Dict{VersionRange, Set{UUID}}() for _ in deps_list]
+                weak_compat_compressed[uuid] = [Dict{VersionRange, Dict{UUID, VersionSpec}}() for _ in deps_list]
+                pkg_versions[uuid] = sort!(collect(union(Set{VersionNumber}(), versions_list...)))
+                pkg_versions_per_registry[uuid] = versions_list
+                continue
+            end
             push!(seen, uuid)
             uuid in keys(fixed) && continue
             uuid_is_stdlib = haskey(stdlibs_for_julia_version, uuid)
@@ -1707,6 +1757,7 @@ function deps_graph(
                 pkg_weak_deps_list = Vector{Dict{VersionRange, Set{UUID}}}()
                 pkg_weak_compat_list = Vector{Dict{VersionRange, Dict{UUID, VersionSpec}}}()
                 pkg_versions_per_reg = Vector{Set{VersionNumber}}()
+                pkg_infos_per_reg = Vector{Registry.PkgInfo}()
 
                 for reg in registries
                     pkg = get(reg, uuid, nothing)
@@ -1760,11 +1811,12 @@ function deps_graph(
                     if !isempty(reg_valid_versions)
                         # Store the full compressed data along with which versions are valid
                         # The query function will check version membership to avoid cross-registry pollution
-                        push!(pkg_deps_list, info.deps)
+                        push!(pkg_deps_list, deps_with_subdeps(info, reg_valid_versions, subpackage_nodes, uuids))
                         push!(pkg_compat_list, info.compat)
                         push!(pkg_weak_deps_list, info.weak_deps)
                         push!(pkg_weak_compat_list, info.weak_compat)
                         push!(pkg_versions_per_reg, reg_valid_versions)
+                        push!(pkg_infos_per_reg, info)
                     end
 
                     # Collect all dependency UUIDs for discovery. Only the dependencies of
@@ -1791,6 +1843,7 @@ function deps_graph(
                 weak_deps_compressed[uuid] = pkg_weak_deps_list
                 weak_compat_compressed[uuid] = pkg_weak_compat_list
                 pkg_versions_per_registry[uuid] = pkg_versions_per_reg
+                pkg_infos[uuid] = pkg_infos_per_reg
             end
         end
     end
@@ -1799,7 +1852,7 @@ function deps_graph(
     unavailable_weak_uuids = Set{UUID}()
 
     for uuid in uuids
-        uuid == JULIA_UUID && continue
+        (uuid == JULIA_UUID || haskey(subpackage_nodes, uuid)) && continue
         if !haskey(uuid_to_name, uuid)
             name = registered_name(registries, uuid)
             if name === nothing
@@ -1815,6 +1868,11 @@ function deps_graph(
             entry ≡ nothing && continue
             uuid_to_name[uuid] = entry.name
         end
+    end
+
+    for (uuid, node) in subpackage_nodes
+        uuid in uuids || continue
+        uuid_to_name[uuid] = string(get(uuid_to_name, node.parent, string(node.parent)), "::", node.name)
     end
 
     # Filter out unavailable weak dependencies from fixed packages
@@ -1846,6 +1904,8 @@ function deps_graph(
             return overridden
         end
         for compat_compressed in (all_compat_compressed, weak_compat_compressed), uuid in collect(keys(compat_compressed))
+            # a subpackage node's compat ties it to its parent's version
+            haskey(subpackage_nodes, uuid) && continue
             compat_compressed[uuid] = map(override_compat, compat_compressed[uuid])
         end
         fixed_overridden = Dict{UUID, Resolve.Fixed}()

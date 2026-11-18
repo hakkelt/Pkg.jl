@@ -219,7 +219,14 @@ run_in_env(code) = read(
                 Pkg.activate(; temp = true)
                 Pkg.add(name = "Solvers", version = "1.0.0")
                 Pkg.compat("Solvers", "=1.0.0")
-                @test_throws Pkg.Resolve.ResolverError Pkg.add("Solvers::Rosenbrock")
+                err = try
+                    Pkg.add("Solvers::Rosenbrock"); nothing
+                catch e
+                    e
+                end
+                @test err isa Pkg.Resolve.ResolverError
+                # the subpackage is a node of the resolver graph of its own
+                @test occursin("Solvers::Rosenbrock", sprint(showerror, err))
             end
 
             @testset "errors" begin
