@@ -1173,20 +1173,16 @@ function workspace_subpackage_selection(env::EnvCache)
 end
 
 """
-    fixed_subpackage_selection(env, pkgs)
+    fixed_subpackage_selection(env, fixed_projects)
 
 The subpackages that the environment uses whichever versions are picked: those that the
-`[subdeps]` of the workspace projects and of the packages in `pkgs` that track a path or a
-repo select (see [`workspace_subpackage_selection`](@ref)). Registered versions select
-subpackages through edges of the resolver graph (see [`SubpackageNode`](@ref)).
+`[subdeps]` of the workspace projects and of the packages that track a path or a repo
+(`fixed_projects`, by uuid) select (see [`workspace_subpackage_selection`](@ref)). Registered
+versions select subpackages through edges of the resolver graph (see [`SubpackageNode`](@ref)).
 """
-function fixed_subpackage_selection(env::EnvCache, pkgs::Vector{PackageSpec})
+function fixed_subpackage_selection(env::EnvCache, fixed_projects::Dict{UUID, Project})
     selection = workspace_subpackage_selection(env)
-    for pkg in pkgs
-        (pkg.uuid === nothing || is_tracking_registry(pkg)) && continue
-        project = subpackage_source_project(env, pkg)
-        project === nothing || add_subdeps!(selection, project)
-    end
+    foreach(project -> add_subdeps!(selection, project), values(fixed_projects))
     return selection
 end
 
@@ -1284,10 +1280,11 @@ function subpackage_node_data(
     if fx !== nothing
         # a single version, which needs no dependency on the (fixed) parent
         project = get(fixed_projects, node.parent, nothing)
-        if project === nothing || !haskey(project.subpackages, node.name)
-            name = project === nothing ? string(node.parent) : something(project.name, string(node.parent))
+        name = something(project === nothing ? nothing : project.name, registered_name(registries, node.parent), string(node.parent))
+        project === nothing &&
+            pkgerror("could not read the project of package $name to find its subpackage $(node.name), which the environment uses")
+        haskey(project.subpackages, node.name) ||
             pkgerror("package $name has no subpackage(s) $(node.name), which the environment uses")
-        end
         r = VersionRange(fx.version)
         push!(deps_list, Dict(r => subpackage_dep_uuids(project, (node.name,))))
         push!(compat_list, Dict(r => Dict{UUID, VersionSpec}()))
@@ -1444,7 +1441,7 @@ function resolve_versions!(
         project = subpackage_source_project(env, pkg)
         project === nothing || (fixed_projects[pkg.uuid] = project)
     end
-    for (uuid, subs) in fixed_subpackage_selection(env, pkgs)
+    for (uuid, subs) in fixed_subpackage_selection(env, fixed_projects)
         own = own_project(env, uuid)
         if own === nothing
             for sub in subs

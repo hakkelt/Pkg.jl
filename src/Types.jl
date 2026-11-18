@@ -122,6 +122,12 @@ function PackageSpec(;
         name, named = parse_subpackage_name(name)
         union!(subpackages, named)
     end
+    if !isempty(subpackages)
+        name === nothing && pkgerror("subpackages $(join(subpackages, ", ")) need the name of their parent package")
+        invalid = filter(!Base.isidentifier, subpackages)
+        isempty(invalid) || pkgerror("invalid subpackage name(s): $(join(repr.(invalid), ", "))")
+        unique!(subpackages)
+    end
     return PackageSpec(name, uuid, version, tree_hash, repo, path, pinned, url, rev, subdir, subpackages)
 end
 
