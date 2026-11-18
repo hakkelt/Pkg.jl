@@ -41,8 +41,8 @@ function write_solvers(path, version, with_rosenbrock)
 
         [subpackages]
         Common = []
-        BDF = ["Common", "Heavy"]
-        $(with_rosenbrock ? "Rosenbrock = [\"Common\", \"Light\"]" : "")
+        BDF = ["::Common", "Heavy"]
+        $(with_rosenbrock ? "Rosenbrock = [\"Solvers::Common\", \"Light\"]" : "")
 
         [compat]
         Heavy = "0.1"
@@ -50,8 +50,8 @@ function write_solvers(path, version, with_rosenbrock)
     )
     write(joinpath(path, "src", "Solvers.jl"), "module Solvers\nend\n")
     write(joinpath(path, "sub", "Common.jl"), "module Common\nabstract type Alg end\nend\n")
-    write(joinpath(path, "sub", "BDF.jl"), "module BDF\nusing Common, Heavy\nsolve() = \"bdf via \" * Heavy.f()\nend\n")
-    with_rosenbrock && write(joinpath(path, "sub", "Rosenbrock.jl"), "module Rosenbrock\nusing Common, Light\nend\n")
+    write(joinpath(path, "sub", "BDF.jl"), "module BDF\nusing Solvers::Common, Heavy\nsolve() = \"bdf via \" * Heavy.f()\nend\n")
+    with_rosenbrock && write(joinpath(path, "sub", "Rosenbrock.jl"), "module Rosenbrock\nusing Solvers::Common, Light\nend\n")
     return
 end
 
@@ -121,10 +121,10 @@ function make_subpackage_registry(dir)
         "Solvers/WeakCompat.toml" => "[1]\nHeavy = \"0.1\"\n",
         "Solvers/Subpackages.toml" => """
             [1]
-            BDF = ["Common", "Heavy"]
+            BDF = ["::Common", "Heavy"]
             Common = []
             ["1.1-1"]
-            Rosenbrock = ["Common", "Light"]
+            Rosenbrock = ["::Common", "Light"]
             """,
         "SolverUser/Package.toml" => "name = \"SolverUser\"\nuuid = \"$USER_UUID\"\nrepo = \"$(toml_path(user_path))\"\n",
         "SolverUser/Versions.toml" => "[\"0.1.0\"]\ngit-tree-sha1 = \"$user_tree\"\n",
@@ -165,7 +165,7 @@ run_in_env(code) = read(
             @testset "project and registry files" begin
                 project = Pkg.Types.read_project(joinpath(solvers_path, "Project.toml"))
                 @test sort!(collect(keys(project.subpackages))) == ["BDF", "Common", "Rosenbrock"]
-                @test Pkg.Types.subpackage_deps(project, "BDF") == ["Common", "Heavy"]
+                @test Pkg.Types.subpackage_deps(project, "BDF") == ["::Common", "Heavy"]
                 registry = only(filter(r -> r.name == "SubReg", Pkg.Registry.reachable_registries()))
                 info = Pkg.Registry.registry_info(registry, registry[SOLVERS_UUID])
                 @test sort!(collect(keys(Pkg.Registry.query_subpackages(info, v"1.0.0")))) == ["BDF", "Common"]
@@ -184,7 +184,7 @@ run_in_env(code) = read(
                 @test !in_manifest(LIGHT_UUID)
                 # the manifest entry records the parent's subpackage definitions
                 @test issubset(["BDF", "Common"], keys(manifest_entry(SOLVERS_UUID).subpackages))
-                @test Pkg.Types.subpackage_deps(manifest_entry(SOLVERS_UUID).subpackages, "BDF") == ["Common", "Heavy"]
+                @test Pkg.Types.subpackage_deps(manifest_entry(SOLVERS_UUID).subpackages, "BDF") == ["::Common", "Heavy"]
                 # status shows the subpackages in use
                 @test occursin(r"Solvers v\S+ ::\{BDF\}", sprint(io -> Pkg.status(; io)))
                 @test occursin(r"Solvers v\S+ ::\{BDF\}", sprint(io -> Pkg.status(; io, mode = Pkg.PKGMODE_MANIFEST)))
@@ -240,17 +240,41 @@ run_in_env(code) = read(
                 @test occursin("no registered version of package Solvers has the subpackage(s) Nope", err.msg)
                 @test_throws Pkg.Types.PkgError Pkg.add("Solvers::")
                 @test_throws Pkg.Types.PkgError Pkg.rm("Solvers::BDF")
-                # a subpackage may not be named like a dependency: the names of both stand
-                # for them in `[subpackages]` and in the triggers of `[extensions]`
-                project = Pkg.Types.read_project(joinpath(solvers_path, "Project.toml"))
-                project.subpackages["Heavy"] = String[]
-                err = try
-                    Pkg.Types.validate(project); nothing
-                catch e
-                    e
+                # sibling subpackages are written `"::Sub"` (or `"Solvers::Sub"`) and plain
+                # names are dependencies, so a subpackage may be named like a dependency
+                project() = Pkg.Types.read_project(joinpath(solvers_path, "Project.toml"))
+                function validate_error(project)
+                    try
+                        Pkg.Types.validate(project); nothing
+                    catch e
+                        e isa Pkg.Types.PkgError || rethrow()
+                        e.msg
+                    end
                 end
-                @test err isa Pkg.Types.PkgError
-                @test occursin("Subpackage `Heavy` has the same name as the package or one of its dependencies", err.msg)
+                p = project()
+                p.subpackages["Heavy"] = ["::Common", "Heavy"]
+                @test validate_error(p) === nothing
+                p = project()
+                p.subpackages["BDF"] = ["Common", "Heavy"]
+                @test occursin("Subpackage `BDF` depends on `Common`, which is not listed in `deps` or `weakdeps` (write \"::Common\"", validate_error(p))
+                p = project()
+                p.subpackages["BDF"] = ["::Nope"]
+                @test occursin("Subpackage `BDF` depends on `::Nope`, which is not listed in `subpackages`", validate_error(p))
+                p = project()
+                p.subpackages["BDF"] = ["Heavy::Sub"]
+                @test occursin("the subpackages of a dependency go in the `subdeps` section", validate_error(p))
+                # extension triggers: `"::Sub"` of the package, `"Dep::Sub"` of a dependency
+                for (triggers, msg) in [["::BDF", "Heavy"] => nothing,
+                                        ["Solvers::BDF"] => nothing,
+                                        ["Heavy::Anything"] => nothing,
+                                        ["BDF"] => "Extension `Ext` has the trigger `BDF`, which is not listed in `deps` or `weakdeps` (write \"::BDF\"",
+                                        ["::Nope"] => "Extension `Ext` has the trigger `::Nope`, which is not listed in `subpackages`",
+                                        ["Nowhere::Sub"] => "Extension `Ext` has the trigger `Nowhere::Sub`, but `Nowhere` is not listed in `deps` or `weakdeps`"]
+                    p = project()
+                    p.exts["Ext"] = triggers
+                    err = validate_error(p)
+                    @test msg === nothing ? err === nothing : occursin(msg, something(err, ""))
+                end
             end
 
             @testset "a registered package's [subdeps]" begin

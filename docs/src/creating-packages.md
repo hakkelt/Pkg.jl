@@ -685,6 +685,8 @@ A large package can be split into subpackages: modules that ship with the packag
 version and compat bounds, but are precompiled and loaded separately, and only when someone asks
 for them. Each subpackage lists what it needs beyond the parent's `[deps]`: sibling subpackages
 and the parent's `[weakdeps]`, which are installed only for the users of those subpackages.
+A sibling subpackage is written `"::Common"` (or `"Solvers::Common"`); a plain name is always one
+of the parent's dependencies, so a subpackage may share its name with one.
 
 ```toml
 name = "Solvers"
@@ -699,8 +701,8 @@ Heavy = "..."
 
 [subpackages]
 Common = []
-Tsit5 = ["Common"]
-BDF = ["Common", "Heavy"]
+Tsit5 = ["::Common"]
+BDF = ["::Common", "Heavy"]
 ```
 
 The code goes in `sub/`:
@@ -708,8 +710,8 @@ The code goes in `sub/`:
 ```julia
 # sub/BDF.jl
 module BDF
-using Common, Heavy   # a sibling subpackage and a weak dependency it lists
-using Solvers         # the parent is always available, as are its [deps]
+using Solvers::Common, Heavy   # a sibling subpackage and a weak dependency it lists
+using Solvers                  # the parent is always available, as are its [deps]
 end
 ```
 
@@ -736,9 +738,21 @@ The package's own environment, where it is the active project or a member of the
 includes all of its subpackages: `pkg> resolve` there installs the weak dependencies of every
 subpackage, and they load without a `[subdeps]` declaration.
 
-A subpackage with `autoload = true`, `Plots = { deps = ["BDF"], autoload = true }`, also loads by
+A subpackage with `autoload = true`, `Plots = { deps = ["::BDF"], autoload = true }`, also loads by
 itself once the parent and the weak dependencies it needs are loaded, like an extension. As for any
 subpackage, it is installed (and so autoloads) only where the environment uses it.
+
+An extension can extend a subpackage by naming it among its triggers: `"::BDF"` for a subpackage
+of the package itself, `"Solvers::BDF"` in a package that depends on `Solvers`:
+
+```toml
+[extensions]
+BDFMakieExt = ["::BDF", "Makie"]
+```
+
+The extension loads once `BDF` and `Makie` are loaded. Loading a trigger subpackage of a
+dependency needs no `[subdeps]` entry, so the extension does not make every user of the package
+install that subpackage.
 
 ## Package naming guidelines
 

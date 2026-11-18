@@ -71,6 +71,7 @@ struct PkgInfo
 
     # Subpackages.toml - which subpackages exist, and what each depends on: the UUIDs of
     # its (weak) dependencies, and the names of the sibling subpackages it depends on
+    # (recorded as `"::Sub"`)
     subpackages::Dict{VersionRange, Dict{String, SubpackageInfo}}
 
     # Subdeps.toml - which subpackages of its dependencies this package uses
@@ -87,8 +88,13 @@ function load_subpackages_data(data_toml::Dict{String, Any}, name_to_uuid)
             info = SubpackageInfo(Set{UUID}(), String[])
             for dep in deps::Vector
                 dep = dep::String
-                uuid = get(name_to_uuid, dep, nothing)
-                uuid === nothing ? push!(info.siblings, dep) : push!(info.deps, uuid)
+                # a sibling subpackage is recorded as `"::Sub"`
+                if startswith(dep, "::")
+                    push!(info.siblings, dep[3:end])
+                else
+                    uuid = get(name_to_uuid, dep, nothing)
+                    uuid === nothing || push!(info.deps, uuid)
+                end
             end
             d[sub] = info
         end

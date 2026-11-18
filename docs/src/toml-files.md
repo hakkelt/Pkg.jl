@@ -261,14 +261,20 @@ see the [Conditional loading of code in packages (Extensions)](@ref Conditional-
 A package lists the subpackages it ships in `[subpackages]`. Each entry names the sibling
 subpackages and `[weakdeps]` that the subpackage needs beyond the parent's `[deps]`, either as a
 list or as a table with a `deps` list and an optional `autoload` key (`true`, or a list of
-trigger packages):
+trigger packages). A sibling subpackage is written `"::Common"` (`"Solvers::Common"`, with the
+name of the package, is accepted too); a plain name is always a dependency, so a subpackage may
+share its name with one:
 
 ```toml
 [subpackages]
 Common = []
-BDF = ["Common", "Heavy"]
-Plots = { deps = ["BDF"], autoload = true }
+BDF = ["::Common", "Heavy"]
+Plots = { deps = ["::BDF"], autoload = true }
 ```
+
+The triggers of an extension in `[extensions]` may be subpackages too: `"::BDF"` for a subpackage
+of the package itself, and `"Dep::Sub"` for a subpackage of a dependency `Dep` in `[deps]` or
+`[weakdeps]`. Such an extension extends the subpackage, and loads once it is loaded.
 
 The code of subpackage `BDF` is in `sub/BDF.jl` or `sub/BDF/BDF.jl`. A project that uses
 subpackages of its dependencies lists them in `[subdeps]`, keyed by the name of the dependency:

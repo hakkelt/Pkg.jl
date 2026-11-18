@@ -186,7 +186,25 @@ function read_project_subdeps(raw::Dict)
 end
 read_project_subdeps(raw) = pkgerror("Expected `subdeps` section to be a key-value list")
 
-# The dependencies listed for subpackage `name`: names of [deps], [weakdeps] or sibling subpackages
+# A subpackage named in the dependency list of a subpackage or among the triggers of an
+# extension: `"::Sub"` (canonical) or `"Parent::Sub"`. Returns `(parent, sub)`, with
+# `parent` empty for `"::Sub"`, or `nothing` for a plain name, which is a dependency.
+function subpackage_ref(s::AbstractString)
+    i = findfirst("::", s)
+    i === nothing && return nothing
+    return (String(s[1:prevind(s, first(i))]), String(s[nextind(s, last(i)):end]))
+end
+
+# The subpackage of package `self` that `s` names (`"::Sub"`, or `"Parent::Sub"` with the
+# package's own name), or `nothing`
+function subpackage_self_ref(s::AbstractString, self::Union{Nothing, AbstractString})
+    ref = subpackage_ref(s)
+    ref === nothing && return nothing
+    return isempty(ref[1]) || ref[1] == self ? ref[2] : nothing
+end
+
+# The dependencies listed for subpackage `name`: names of [deps] or [weakdeps], and sibling
+# subpackages as `"::Sub"` (see `subpackage_ref`)
 subpackage_deps(project::Project, name::String) = subpackage_deps(project.subpackages, name)
 function subpackage_deps(subpackages::Dict{String, Any}, name::String)
     entry = subpackages[name]
@@ -243,17 +261,38 @@ function validate(project::Project; file = nothing)
         haskey(project.deps, name) || haskey(project.weakdeps, name) ||
             pkgerror("Compat override `$name` not listed in `deps` or `weakdeps` section" * location_string)
     end
-    # subpackages and subdeps
-    for name in keys(project.subpackages)
-        # a subpackage is named like a module, and the name stands for it in `[subpackages]`
-        # and in the triggers of `[extensions]`, next to the names of the dependencies
-        if name == project.name || haskey(project.deps, name) || haskey(project.weakdeps, name)
-            pkgerror("Subpackage `$name` has the same name as the package or one of its dependencies" * location_string)
+    # subpackages and subdeps: in the dependency list of a subpackage, a plain name is one of
+    # [deps] or [weakdeps] and a sibling subpackage is written `"::Sub"`, so a subpackage may
+    # be named like a dependency
+    for name in keys(project.subpackages), dep in subpackage_deps(project, name)
+        ref = subpackage_ref(dep)
+        if ref === nothing
+            haskey(project.deps, dep) || haskey(project.weakdeps, dep) || pkgerror(
+                "Subpackage `$name` depends on `$dep`, which is not listed in `deps` or `weakdeps`" *
+                (haskey(project.subpackages, dep) ? " (write \"::$dep\" for the subpackage `$dep`)" : "") * location_string
+            )
+        elseif subpackage_self_ref(dep, project.name) === nothing
+            pkgerror("Subpackage `$name` depends on `$dep`: a subpackage lists only sibling subpackages, as \"::Sub\"; \
+                      the subpackages of a dependency go in the `subdeps` section" * location_string)
+        else
+            haskey(project.subpackages, ref[2]) ||
+                pkgerror("Subpackage `$name` depends on `$dep`, which is not listed in `subpackages`" * location_string)
         end
     end
-    for name in keys(project.subpackages), dep in subpackage_deps(project, name)
-        haskey(project.deps, dep) || haskey(project.weakdeps, dep) || haskey(project.subpackages, dep) ||
-            pkgerror("Subpackage `$name` depends on `$dep`, which is not listed in `deps`, `weakdeps` or `subpackages`" * location_string)
+    # extensions may be triggered by subpackages: `"::Sub"` of the package, `"Dep::Sub"` of a dependency
+    for (ext, triggers) in project.exts, trigger in (triggers isa AbstractString ? [triggers] : triggers)
+        ref = subpackage_ref(trigger)
+        if ref === nothing
+            !haskey(project.deps, trigger) && !haskey(project.weakdeps, trigger) && haskey(project.subpackages, trigger) &&
+                pkgerror("Extension `$ext` has the trigger `$trigger`, which is not listed in `deps` or `weakdeps` \
+                          (write \"::$trigger\" for the subpackage `$trigger`)" * location_string)
+        elseif subpackage_self_ref(trigger, project.name) !== nothing
+            haskey(project.subpackages, ref[2]) ||
+                pkgerror("Extension `$ext` has the trigger `$trigger`, which is not listed in `subpackages`" * location_string)
+        else
+            haskey(project.deps, ref[1]) || haskey(project.weakdeps, ref[1]) ||
+                pkgerror("Extension `$ext` has the trigger `$trigger`, but `$(ref[1])` is not listed in `deps` or `weakdeps`" * location_string)
+        end
     end
     for name in keys(project.subdeps)
         haskey(project.deps, name) || haskey(project._deps_weak, name) ||

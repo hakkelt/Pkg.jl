@@ -1188,11 +1188,11 @@ end
 
 # The dependencies (by UUID) that subpackages `subs` need, following sibling subpackages
 subpackage_dep_uuids(project::Project, subs) =
-    subpackage_dep_uuids(project.subpackages, project.deps, project.weakdeps, subs)
+    subpackage_dep_uuids(project.subpackages, project.name, project.deps, project.weakdeps, subs)
 subpackage_dep_uuids(entry::PackageEntry, subs) =
-    subpackage_dep_uuids(entry.subpackages, entry.deps, entry.weakdeps, subs)
-function subpackage_dep_uuids(subpackages::Dict{String, Any}, deps::Dict{String, UUID},
-                              weakdeps::Dict{String, UUID}, subs)
+    subpackage_dep_uuids(entry.subpackages, entry.name, entry.deps, entry.weakdeps, subs)
+function subpackage_dep_uuids(subpackages::Dict{String, Any}, self::Union{Nothing, String},
+                              deps::Dict{String, UUID}, weakdeps::Dict{String, UUID}, subs)
     uuids = Set{UUID}()
     todo = collect(String, subs)
     seen = Set{String}()
@@ -1202,9 +1202,10 @@ function subpackage_dep_uuids(subpackages::Dict{String, Any}, deps::Dict{String,
         push!(seen, sub)
         haskey(subpackages, sub) || continue
         for dep in Types.subpackage_deps(subpackages, sub)
-            if haskey(subpackages, dep)
-                push!(todo, dep)
-            else
+            sibling = Types.subpackage_self_ref(dep, self)
+            if sibling !== nothing
+                push!(todo, sibling)
+            elseif Types.subpackage_ref(dep) === nothing
                 uuid = get(weakdeps, dep, get(deps, dep, nothing))
                 uuid === nothing || push!(uuids, uuid)
             end
@@ -4830,7 +4831,7 @@ function status_ext_info(pkg::PackageSpec, env::EnvCache)
     depses = manifest_info.deps
     weakdepses = manifest_info.weakdeps
     exts = manifest_info.exts
-    if !isempty(weakdepses) && !isempty(exts)
+    if !isempty(exts)
         v = ExtInfo[]
         for (ext, extdeps) in exts
             extdeps isa String && (extdeps = String[extdeps])
@@ -4839,10 +4840,16 @@ function status_ext_info(pkg::PackageSpec, env::EnvCache)
             # Check if deps are loaded
             extdeps_info = Tuple{String, Bool}[]
             for extdep in extdeps
-                if haskey(manifest_info.subpackages, extdep)
-                    # a subpackage of the package itself triggers the extension
-                    sub = Base.PkgId(subpackage_node_uuid(pkg.uuid, extdep), extdep)
-                    push!(extdeps_info, (string(pkg.name, "::", extdep), haskey(Base.loaded_modules, sub)))
+                ref = Types.subpackage_ref(extdep)
+                if ref !== nothing
+                    # a subpackage of the package itself (`"::Sub"`) or of a dependency triggers the extension
+                    owner, subname = ref
+                    owner_uuid = isempty(owner) || owner == pkg.name ? pkg.uuid :
+                        get(weakdepses, owner, get(depses, owner, nothing))
+                    owner_uuid === nothing && pkgerror(
+                        "$(pkg.name) has a malformed Project.toml, the extension trigger $extdep names a package not listed in [weakdeps] or [deps]")
+                    sub = Base.PkgId(subpackage_node_uuid(owner_uuid, subname), subname)
+                    push!(extdeps_info, (string(isempty(owner) ? pkg.name : owner, "::", subname), haskey(Base.loaded_modules, sub)))
                     continue
                 end
                 if !(haskey(weakdepses, extdep) || haskey(depses, extdep))
