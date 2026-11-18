@@ -293,6 +293,15 @@ function parse_package_spec_new(input::String)
         input = input[2:(end - 1)]
     end
 
+    # A subpackage, `Parent::Sub` or `Parent::{Sub1,Sub2}` (possibly with a version for
+    # the parent), before `Name:subdir` would take the colons
+    if occursin(r"^\w+(?:\.jl)?::", input)
+        name, version = occursin('@', input) ? split(input, '@'; limit = 2) : (input, nothing)
+        tokens = PackageToken[PackageIdentifier(String(name))]
+        version === nothing || push!(tokens, VersionToken(String(version)))
+        return tokens
+    end
+
     # Handle GitHub tree/commit URLs first (special case)
     github_result = preprocess_github_url(input)
     if github_result !== nothing
@@ -439,6 +448,9 @@ function parse_package_identifier(pkg_id::PackageIdentifier; add_or_develop = fa
     end
     if occursin(uuid_re, word)
         return PackageSpec(; uuid = UUID(word))
+    elseif occursin(r"^\w+(?:\.jl)?::", word)
+        # a subpackage, `Parent::Sub`, or several, `Parent::{Sub1,Sub2}`
+        return PackageSpec(word)
     elseif occursin(name_re, word)
         m = match(name_re, word)
         return PackageSpec(String(something(m.captures[1])))

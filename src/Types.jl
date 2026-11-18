@@ -100,6 +100,8 @@ mutable struct PackageSpec
     url::Union{Nothing, String}
     rev::Union{Nothing, String}
     subdir::Union{Nothing, String}
+    # the subpackages named with `Parent::Sub` or `Parent::{Sub1, Sub2}`
+    subpackages::Vector{String}
 end
 function PackageSpec(;
         name::Union{Nothing, AbstractString} = nothing,
@@ -112,9 +114,36 @@ function PackageSpec(;
         url = nothing,
         rev = nothing,
         subdir = nothing,
+        subpackages::AbstractVector{<:AbstractString} = String[],
     )
     uuid = uuid === nothing ? nothing : UUID(uuid)
-    return PackageSpec(name, uuid, version, tree_hash, repo, path, pinned, url, rev, subdir)
+    subpackages = String[s for s in subpackages]
+    if name !== nothing && occursin("::", name)
+        name, named = parse_subpackage_name(name)
+        union!(subpackages, named)
+    end
+    if !isempty(subpackages)
+        name === nothing && pkgerror("subpackages $(join(subpackages, ", ")) need the name of their parent package")
+        invalid = filter(!Base.isidentifier, subpackages)
+        isempty(invalid) || pkgerror("invalid subpackage name(s): $(join(repr.(invalid), ", "))")
+        unique!(subpackages)
+    end
+    return PackageSpec(name, uuid, version, tree_hash, repo, path, pinned, url, rev, subdir, subpackages)
+end
+
+# `Parent::Sub` names subpackage `Sub` of package `Parent`, and `Parent::{Sub1, Sub2}`
+# several of them: the name of the parent and those of the subpackages
+function parse_subpackage_name(str::AbstractString)
+    parent, sub = split(str, "::"; limit = 2)
+    parent = chopsuffix(parent, ".jl")
+    names = if startswith(sub, '{') && endswith(sub, '}')
+        filter!(!isempty, map(strip, split(sub[2:(end - 1)], ',')))
+    else
+        [sub]
+    end
+    (Base.isidentifier(parent) && !isempty(names) && all(Base.isidentifier, names)) ||
+        pkgerror("`$str` is not a valid subpackage, expected `Parent::Sub` or `Parent::{Sub1, Sub2}`")
+    return String(parent), unique!(String.(names))
 end
 PackageSpec(name::AbstractString) = PackageSpec(; name = name)::PackageSpec
 PackageSpec(name::AbstractString, uuid::UUID) = PackageSpec(; name = name, uuid = uuid)::PackageSpec
@@ -154,6 +183,7 @@ function Base.show(io::IO, pkg::PackageSpec)
     pkg.url !== nothing && push!(f, "url" => pkg.url)
     pkg.rev !== nothing && push!(f, "rev" => pkg.rev)
     pkg.subdir !== nothing && push!(f, "subdir" => pkg.subdir)
+    isempty(pkg.subpackages) || push!(f, "subpackages" => join(pkg.subpackages, ", "))
     pkg.pinned && push!(f, "pinned" => pkg.pinned)
     push!(f, "version" => (vstr == "VersionSpec(\"*\")" ? "*" : vstr))
     if pkg.repo.source !== nothing
@@ -272,6 +302,10 @@ Base.@kwdef mutable struct Project
     _deps_weak::Dict{String, UUID} = Dict{String, UUID}()
     weakdeps::Dict{String, UUID} = Dict{String, UUID}()
     exts::Dict{String, Union{Vector{String}, String}} = Dict{String, String}()
+    # `[subpackages]`: name => raw entry (a list of deps, or a table with `deps` and `autoload`)
+    subpackages::Dict{String, Any} = Dict{String, Any}()
+    # `[subdeps]`: name of a dependency => the subpackages of it that this project uses
+    subdeps::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     extras::Dict{String, UUID} = Dict{String, UUID}()
     targets::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     apps::Dict{String, AppInfo} = Dict{String, AppInfo}()
@@ -297,6 +331,10 @@ Base.@kwdef mutable struct PackageEntry
     deps::Dict{String, UUID} = Dict{String, UUID}()
     weakdeps::Dict{String, UUID} = Dict{String, UUID}()
     exts::Dict{String, Union{Vector{String}, String}} = Dict{String, String}()
+    # copied from the package's project file: its `[subpackages]` (name => list of deps,
+    # or a table with `deps` and `autoload`) and its `[subdeps]`
+    subpackages::Dict{String, Any} = Dict{String, Any}()
+    subdeps::Dict{String, Vector{String}} = Dict{String, Vector{String}}()
     uuid::Union{Nothing, UUID} = nothing
     apps::Dict{String, AppInfo} = Dict{String, AppInfo}() # used by AppManifest.toml
     registries::Vector{String} = String[]
@@ -313,12 +351,14 @@ Base.:(==)(t1::PackageEntry, t2::PackageEntry) = t1.name == t2.name &&
     t1.deps == t2.deps &&
     t1.weakdeps == t2.weakdeps &&
     t1.exts == t2.exts &&
+    t1.subpackages == t2.subpackages &&
+    t1.subdeps == t2.subdeps &&
     t1.uuid == t2.uuid &&
     t1.apps == t2.apps &&
     t1.julia_syntax_version == t2.julia_syntax_version &&
     t1.registries == t2.registries
 # omits `other`
-Base.hash(x::PackageEntry, h::UInt) = foldr(hash, [x.name, x.version, x.path, x.entryfile, x.pinned, x.repo, x.tree_hash, x.deps, x.weakdeps, x.exts, x.uuid, x.registries, x.julia_syntax_version], init = h)  # omits `other`
+Base.hash(x::PackageEntry, h::UInt) = foldr(hash, [x.name, x.version, x.path, x.entryfile, x.pinned, x.repo, x.tree_hash, x.deps, x.weakdeps, x.exts, x.subpackages, x.subdeps, x.uuid, x.registries, x.julia_syntax_version], init = h)  # omits `other`
 
 """
     ManifestRegistryEntry
@@ -734,6 +774,19 @@ function workspace_resolve_hash(env::EnvCache; include_sources::Bool = true)
         println(iob)
         for (name, compat) in sort!(collect(extras_compats); by = first)
             println(iob, name, "=", compat)
+        end
+    end
+    # `[subdeps]` changes what gets installed. Only appended when present, as above.
+    subdeps = Dict{String, Vector{String}}()
+    for project in Iterators.flatten(((env.project,), values(env.workspace)))
+        for (name, subs) in project.subdeps
+            subdeps[name] = sort!(union(get(subdeps, name, String[]), subs))
+        end
+    end
+    if !isempty(subdeps)
+        println(iob, "\nsubdeps")
+        for (name, subs) in sort!(collect(subdeps); by = first)
+            println(iob, name, "=", join(subs, ","))
         end
     end
     overrides = Dict{String, VersionSpec}()

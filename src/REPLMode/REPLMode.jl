@@ -193,6 +193,8 @@ function lex(cmd::String)::Vector{QString}
     replace_comma = (nothing != match(r"^(add|dev|develop|rm|remove|status|precompile)+\s", cmd))
     in_doublequote = false
     in_singlequote = false
+    # inside `{...}`, as in `Parent::{A, B}`, spaces and commas do not separate words
+    brace_depth = 0
     qstrings = QString[]
     token_in_progress = Char[]
 
@@ -216,9 +218,14 @@ function lex(cmd::String)::Vector{QString}
                 in_singlequote ? push_token!(true) : push_token!(false)
                 in_singlequote = !in_singlequote
             end
+        elseif (c == '{' || c == '}') && !(in_doublequote || in_singlequote)
+            brace_depth = max(0, brace_depth + (c == '{' ? 1 : -1))
+            push!(token_in_progress, c)
         elseif c == ' '
             if in_doublequote || in_singlequote # raw char
                 push!(token_in_progress, c)
+            elseif brace_depth > 0
+                # `Parent::{A, B}` is the word `Parent::{A,B}`
             else # delimiter
                 push_token!(false)
             end
@@ -230,7 +237,7 @@ function lex(cmd::String)::Vector{QString}
                 push!(qstrings, QString(";", false))
             end
         elseif c == ','
-            if in_doublequote || in_singlequote || !replace_comma # raw char
+            if in_doublequote || in_singlequote || !replace_comma || brace_depth > 0 # raw char
                 # don't replace ',' in quotes
                 push!(token_in_progress, c)
             else

@@ -676,6 +676,84 @@ if it finds packages under `[compat]` that is not listed in `[extras]`.
 
 For Julia 1.13+, using workspaces is recommended and this duplication is not necessary.
 
+## [Subpackages](@id Subpackages)
+
+!!! warning "Prototype"
+    Subpackages are a prototype. Their syntax and semantics may change.
+
+A large package can be split into subpackages: modules that ship with the package and share its
+version and compat bounds, but are precompiled and loaded separately, and only when someone asks
+for them. Each subpackage lists what it needs beyond the parent's `[deps]`: sibling subpackages
+and the parent's `[weakdeps]`, which are installed only for the users of those subpackages.
+A sibling subpackage is written `"::Common"` (or `"Solvers::Common"`); a plain name is always one
+of the parent's dependencies, so a subpackage may share its name with one.
+
+```toml
+name = "Solvers"
+uuid = "..."
+version = "1.2.3"
+
+[deps]
+Light = "..."
+
+[weakdeps]
+Heavy = "..."
+
+[subpackages]
+Common = []
+Tsit5 = ["::Common"]
+BDF = ["::Common", "Heavy"]
+```
+
+The code goes in `sub/`:
+
+```julia
+# sub/BDF.jl
+module BDF
+using Solvers::Common, Heavy   # a sibling subpackage and a weak dependency it lists
+using Solvers                  # the parent is always available, as are its [deps]
+end
+```
+
+A user of the package adds the subpackages it needs:
+
+```julia-repl
+(MyProject) pkg> add Solvers::BDF
+```
+
+which adds `Solvers` to `[deps]` (if it is not there yet), `BDF` to `[subdeps]`, and installs
+`Heavy`. Several subpackages can be named at once, as in `pkg> add Solvers::{BDF, Tsit5}` or
+`Pkg.add("Solvers::{BDF,Tsit5}")`, and `rm` accepts the same forms. Then
+
+```julia
+using Solvers::BDF
+using Solvers, Solvers::{BDF, Tsit5}  # several at once, and the parent
+```
+
+loads `BDF` (and `Common`). `pkg> status` shows the subpackages in use after the package version,
+as in `Solvers v1.2.3 ::{BDF,Tsit5}`. A package that uses subpackages of a dependency declares them in its
+own `[subdeps]` in the same way; loading a subpackage that is not declared is an error.
+
+The package's own environment, where it is the active project or a member of the workspace,
+includes all of its subpackages: `pkg> resolve` there installs the weak dependencies of every
+subpackage, and they load without a `[subdeps]` declaration.
+
+A subpackage with `autoload = true`, `Plots = { deps = ["::BDF"], autoload = true }`, also loads by
+itself once the parent and the weak dependencies it needs are loaded, like an extension. As for any
+subpackage, it is installed (and so autoloads) only where the environment uses it.
+
+An extension can extend a subpackage by naming it among its triggers: `"::BDF"` for a subpackage
+of the package itself, `"Solvers::BDF"` in a package that depends on `Solvers`:
+
+```toml
+[extensions]
+BDFMakieExt = ["::BDF", "Makie"]
+```
+
+The extension loads once `BDF` and `Makie` are loaded. Loading a trigger subpackage of a
+dependency needs no `[subdeps]` entry, so the extension does not make every user of the package
+install that subpackage.
+
 ## Package naming guidelines
 
 The [package naming guidelines for the `General` registry](https://github.com/JuliaRegistries/General/blob/master/NAMING_GUIDELINES.md) establish clear rules that may be helpful for naming packages even if they are not submitted to the General registry.

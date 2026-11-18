@@ -411,6 +411,23 @@ function add(
     )
     from === nothing && require_not_empty(pkgs, :add)
     Context!(ctx; kwargs...)
+    pkgs, subpackages = split_subpackage_specs(pkgs)
+    if !isempty(subpackages)
+        # `add Parent::Sub` for a package that is already a dependency only starts using the
+        # subpackage: adding the package again would e.g. stop tracking a developed one
+        project = ctx.env.project
+        is_dep(name) = haskey(project.deps, name) || haskey(project._deps_weak, name)
+        plain(pkg) = pkg.version == VersionSpec() && pkg.repo.source === nothing && pkg.repo.rev === nothing &&
+            pkg.path === nothing && pkg.uuid === nothing && !pkg.pinned
+        filter!(pkg -> !(haskey(subpackages, pkg.name) && is_dep(pkg.name) && plain(pkg)), pkgs)
+        if isempty(pkgs)
+            target == :deps || pkgerror("subpackages can only be added as `deps`")
+            check_readonly(ctx)
+            record_subdeps!(project, subpackages)   # (every parent is already a dep)
+            resolve(ctx)
+            return
+        end
+    end
     Operations.ensure_manifest_registries!(ctx)
     check_readonly(ctx)
     if from !== nothing
@@ -468,12 +485,39 @@ function add(
             update_source_if_set(ctx.env, pkg)
         end
 
+        if !isempty(subpackages)
+            target == :deps || pkgerror("subpackages can only be added as `deps`")
+            record_subdeps!(ctx.env.project, subpackages)
+        end
         Operations.add(ctx, pkgs, new_git; allow_autoprecomp, preserve, platform, target, prefer_loaded_versions, lazy)
     catch
         remove_unused_checkouts(ctx, repo_pkgs, new_git)
         rethrow()
     end
     return
+end
+
+# The subpackages that `pkgs` name (`Parent::Sub`), by parent, and `pkgs` with each of those
+# parents once: `add A::B A::C` names package `A` once
+function split_subpackage_specs(pkgs::Vector{PackageSpec})
+    subpackages = Dict{String, Vector{String}}()
+    out = PackageSpec[]
+    for pkg in pkgs
+        if !isempty(pkg.subpackages)
+            union!(get!(Vector{String}, subpackages, pkg.name::String), pkg.subpackages)
+            any(p -> p.name == pkg.name, out) && continue
+        end
+        push!(out, pkg)
+    end
+    return out, subpackages
+end
+
+# Record in the [subdeps] of `project` the subpackages named for each parent
+function record_subdeps!(project, subpackages::Dict{String, Vector{String}})
+    for (name, subs) in subpackages
+        project.subdeps[name] = sort!(union(get(project.subdeps, name, String[]), subs))
+    end
+    return project
 end
 
 # Remove the checkouts made by a failed `add` that the environment does not use: a later
@@ -502,6 +546,23 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec}; mode = PKGMODE_PROJECT, all
     Context!(ctx; kwargs...)
     Operations.ensure_manifest_registries!(ctx)
     check_readonly(ctx)
+    # `rm Parent::Sub` stops using the subpackage, and keeps the package
+    sub_pkgs = filter(pkg -> !isempty(pkg.subpackages), pkgs)
+    if !isempty(sub_pkgs)
+        _, subpackages = split_subpackage_specs(sub_pkgs)
+        for (name, subs) in subpackages
+            used = get(ctx.env.project.subdeps, name, String[])
+            unused = setdiff(subs, used)
+            isempty(unused) || pkgerror("the project does not use subpackage(s) $(join(unused, ", ")) of `$name`")
+            remaining = setdiff(used, subs)
+            isempty(remaining) ? delete!(ctx.env.project.subdeps, name) : (ctx.env.project.subdeps[name] = remaining)
+        end
+        pkgs = filter(pkg -> !any(p -> p === pkg, sub_pkgs), pkgs)
+        if isempty(pkgs) && !all_pkgs
+            resolve(ctx)
+            return
+        end
+    end
     if all_pkgs
         !isempty(pkgs) && pkgerror("cannot specify packages when operating on all packages")
         append_all_pkgs!(pkgs, ctx, mode)
