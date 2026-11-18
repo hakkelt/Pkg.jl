@@ -4839,6 +4839,12 @@ function status_ext_info(pkg::PackageSpec, env::EnvCache)
             # Check if deps are loaded
             extdeps_info = Tuple{String, Bool}[]
             for extdep in extdeps
+                if haskey(manifest_info.subpackages, extdep)
+                    # a subpackage of the package itself triggers the extension
+                    sub = Base.PkgId(subpackage_node_uuid(pkg.uuid, extdep), extdep)
+                    push!(extdeps_info, (string(pkg.name, "::", extdep), haskey(Base.loaded_modules, sub)))
+                    continue
+                end
                 if !(haskey(weakdepses, extdep) || haskey(depses, extdep))
                     pkgerror(
                         isnothing(pkg.name) ? "M" : "$(pkg.name) has a malformed Project.toml, ",
